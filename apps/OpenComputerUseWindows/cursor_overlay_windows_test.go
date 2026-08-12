@@ -5,12 +5,18 @@ package main
 import (
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 	"unsafe"
+)
+
+const (
+	WS_VISIBLE    = 0x10000000
+	WS_EX_TOPMOST = 0x00000008
 )
 
 func TestWin32ABIPACKING(t *testing.T) {
@@ -36,6 +42,35 @@ func TestWin32ABIPACKING(t *testing.T) {
 		if float64(unpackedX) != math.Round(tc.x) || float64(unpackedY) != math.Round(tc.y) {
 			t.Fatalf("Unpacked point = (%d, %d), expected (%v, %v)", unpackedX, unpackedY, tc.x, tc.y)
 		}
+	}
+}
+
+func TestPowerShellDPIAwarenessContext(t *testing.T) {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `
+		Add-Type -TypeDefinition @"
+		using System;
+		using System.Runtime.InteropServices;
+		public static class OCUWin32Test {
+			[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+			[DllImport("user32.dll")] public static extern IntPtr GetThreadDpiAwarenessContext();
+			[DllImport("user32.dll")] public static extern bool AreDpiAwarenessContextsEqual(IntPtr c1, IntPtr c2);
+		}
+"@
+		$PMv2 = [IntPtr]::new(-4)
+		[void][OCUWin32Test]::SetThreadDpiAwarenessContext($PMv2)
+		$eff = [OCUWin32Test]::GetThreadDpiAwarenessContext()
+		$isPMv2 = [OCUWin32Test]::AreDpiAwarenessContextsEqual($eff, $PMv2)
+		Write-Output "IS_PMV2=$isPMv2"
+	`)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to run PowerShell DPI check: %v", err)
+	}
+
+	text := string(out)
+	if !strings.Contains(text, "IS_PMV2=True") {
+		t.Fatalf("PowerShell process failed to establish PMv2 DPI awareness context: %s", text)
 	}
 }
 
@@ -81,10 +116,10 @@ func TestWindowFromPointIntegration(t *testing.T) {
 	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
 	hwnd, _, _ := procCreateWindowExW.Call(
-		0,
+		WS_EX_TOPMOST,
 		uintptr(unsafe.Pointer(className)),
 		0,
-		WS_POPUP,
+		WS_POPUP|WS_VISIBLE,
 		200, 200, 300, 300,
 		0, 0, hInst, 0,
 	)
@@ -94,9 +129,8 @@ func TestWindowFromPointIntegration(t *testing.T) {
 	}
 	defer procDestroyWindow.Call(hwnd)
 
-	procShowWindow.Call(hwnd, SW_SHOW)
-	procSetWindowPos.Call(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
-	time.Sleep(20 * time.Millisecond)
+	procSetWindowPos.Call(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
+	time.Sleep(30 * time.Millisecond)
 
 	hit := platformWindowIDAtPoint(Pt{X: 250, Y: 250}, 0)
 	root := platformGetRootWindow(hwnd)
@@ -118,9 +152,9 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	}
 	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
-	// Create target window (bottom)
+	// Create target window
 	targetHWND, _, _ := procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
+		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
 		100, 100, 400, 400, 0, 0, hInst, 0,
 	)
 	if targetHWND == 0 {
@@ -128,9 +162,9 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	}
 	defer procDestroyWindow.Call(targetHWND)
 
-	// Create unrelated window (top)
+	// Create unrelated window
 	unrelatedHWND, _, _ := procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
+		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
 		100, 100, 400, 400, 0, 0, hInst, 0,
 	)
 	if unrelatedHWND == 0 {
@@ -138,11 +172,9 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	}
 	defer procDestroyWindow.Call(unrelatedHWND)
 
-	procShowWindow.Call(targetHWND, SW_SHOWNA)
-	procShowWindow.Call(unrelatedHWND, SW_SHOWNA)
-
-	// Place unrelated above target
-	procSetWindowPos.Call(unrelatedHWND, targetHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+	// Setup initial Z-order: unrelated (top) > target (bottom)
+	procSetWindowPos.Call(unrelatedHWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)
+	procSetWindowPos.Call(targetHWND, unrelatedHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)
 
 	ctrl := NewVisualCursorController()
 	ctrl.ensureOverlay()
@@ -150,16 +182,32 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 		t.Skip("Overlay creation unavailable")
 	}
 
-	// Call setZOrder(targetHWND)
+	targetRoot := platformGetRootWindow(targetHWND)
+
+	// Call setZOrder(targetHWND) to position overlay immediately above target
 	ctrl.overlay.setZOrder(targetHWND)
 
-	// Call setZOrder repeatedly to verify Z-order is preserved and not destroyed
+	// Assert Z-order relation: target (prev of target) == overlay
+	prevOfTarget, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
+	if prevOfTarget != ctrl.overlay.hwnd {
+		t.Fatalf("GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", prevOfTarget, ctrl.overlay.hwnd)
+	}
+
+	// Repeat setZOrder(targetHWND) 3 times to verify Z-order is preserved
 	for i := 0; i < 3; i++ {
 		ctrl.overlay.setZOrder(targetHWND)
-		p, _, _ := procGetWindow.Call(ctrl.overlay.hwnd, GW_HWNDPREV)
-		if p == ctrl.overlay.hwnd {
-			t.Fatalf("setZOrder loop iteration %d set prev to self!", i)
+
+		pTarget, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
+		if pTarget != ctrl.overlay.hwnd {
+			t.Fatalf("Iteration %d: GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", i, pTarget, ctrl.overlay.hwnd)
 		}
+	}
+
+	// Test small movement (<= 2px) preserving Z-order
+	ctrl.MoveToAndWait(102, 102)
+	pTargetSmall, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
+	if pTargetSmall != ctrl.overlay.hwnd {
+		t.Fatalf("After small move: GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", pTargetSmall, ctrl.overlay.hwnd)
 	}
 
 	ctrl.Reset()
@@ -178,14 +226,17 @@ func TestCandidateScoringWithVisibleOverlayOverTarget(t *testing.T) {
 	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
 	targetHWND, _, _ := procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
+		WS_EX_TOPMOST, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
 		100, 100, 500, 500, 0, 0, hInst, 0,
 	)
 	if targetHWND == 0 {
 		t.Skip("Could not create target window")
 	}
 	defer procDestroyWindow.Call(targetHWND)
-	procShowWindow.Call(targetHWND, SW_SHOWNA)
+	procSetWindowPos.Call(targetHWND, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
+	time.Sleep(30 * time.Millisecond)
+
+	targetRoot := platformGetRootWindow(targetHWND)
 
 	ctrl := NewVisualCursorController()
 	ctrl.SetTargetHWND(targetHWND)
@@ -194,9 +245,15 @@ func TestCandidateScoringWithVisibleOverlayOverTarget(t *testing.T) {
 		t.Skip("Overlay creation unavailable")
 	}
 
-	// Place overlay visually over target
+	// Place overlay directly over target at (200, 200)
 	ctrl.overlay.updateFrame(200, 200, ctrl.initialRenderState(Pt{X: 200, Y: 200}), 0)
 	ctrl.overlay.show()
+
+	// Assert platformWindowIDAtPoint(pt, overlay.hwnd) finds targetRoot below overlay!
+	hitBelowOverlay := platformWindowIDAtPoint(Pt{X: 200, Y: 200}, ctrl.overlay.hwnd)
+	if hitBelowOverlay != targetRoot {
+		t.Fatalf("platformWindowIDAtPoint below overlay = 0x%x, expected targetRoot 0x%x", hitBelowOverlay, targetRoot)
+	}
 
 	cand := ctrl.bestMotionCandidate(Pt{X: 150, Y: 150}, Pt{X: 250, Y: 250})
 	if cand.Identifier == "" {
@@ -261,11 +318,12 @@ func TestNoPhysicalMouseInputAPICalls(t *testing.T) {
 		t.Fatal("Could not list Go source files")
 	}
 
+	files = append(files, "runtime.ps1")
 	prohibitedAPIs := []string{"SetCursorPos", "SendInput", "mouse_event"}
 
 	for _, file := range files {
 		if strings.HasSuffix(file, "_test.go") {
-			continue // Audit production source code only
+			continue // Skip test files, audit production files only
 		}
 		content, err := os.ReadFile(file)
 		if err != nil {
@@ -274,7 +332,7 @@ func TestNoPhysicalMouseInputAPICalls(t *testing.T) {
 		text := string(content)
 		for _, prohibited := range prohibitedAPIs {
 			if strings.Contains(text, prohibited) {
-				t.Fatalf("Prohibited physical mouse input API %q found in production source file %s!", prohibited, file)
+				t.Fatalf("Prohibited physical mouse input API %q found in production file %s!", prohibited, file)
 			}
 		}
 	}

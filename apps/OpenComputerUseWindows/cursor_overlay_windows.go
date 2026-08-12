@@ -74,6 +74,7 @@ const (
 	WM_USER = 0x0400
 	WM_QUIT = 0x0012
 
+	GW_HWNDNEXT = 2
 	GW_HWNDPREV = 3
 	GA_ROOT     = 2
 
@@ -517,10 +518,19 @@ func platformMonitorWorkArea(pt Pt) Rect {
 func platformWindowIDAtPoint(pt Pt, excludeHWND uintptr) uintptr {
 	packed := packPoint(pt)
 	hwnd, _, _ := procWindowFromPoint.Call(packed)
-	if hwnd == 0 || hwnd == excludeHWND {
+	if hwnd == 0 {
 		return 0
 	}
-	return platformGetRootWindow(hwnd)
+	excludeRoot := platformGetRootWindow(excludeHWND)
+	for hwnd != 0 {
+		root := platformGetRootWindow(hwnd)
+		if excludeHWND != 0 && (hwnd == excludeHWND || root == excludeRoot) {
+			hwnd, _, _ = procGetWindow.Call(hwnd, GW_HWNDNEXT)
+			continue
+		}
+		return root
+	}
+	return 0
 }
 
 func platformGetRootWindow(hwnd uintptr) uintptr {

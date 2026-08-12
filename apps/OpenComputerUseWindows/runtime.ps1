@@ -51,7 +51,7 @@ public static class OCUWin32 {
     public static extern IntPtr SendMessage(IntPtr hWnd, UInt32 msg, IntPtr wParam, string lParam);
 
     [DllImport("user32.dll")]
-    public static extern bool SetThreadDpiAwarenessContext(IntPtr dpiContext);
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetThreadDpiAwarenessContext();
@@ -66,8 +66,10 @@ public static class OCUWin32 {
 
 try {
     $PMv2 = [IntPtr]::new(-4)
-    $setOk = [OCUWin32]::SetThreadDpiAwarenessContext($PMv2)
-    if (-not $setOk) {
+    $previousDpiCtx = [OCUWin32]::SetThreadDpiAwarenessContext($PMv2)
+    $effectiveDpiCtx = [OCUWin32]::GetThreadDpiAwarenessContext()
+    $isPMv2 = [OCUWin32]::AreDpiAwarenessContextsEqual($effectiveDpiCtx, $PMv2)
+    if (-not $isPMv2) {
         [void][OCUWin32]::SetProcessDPIAware()
     }
 } catch {}
