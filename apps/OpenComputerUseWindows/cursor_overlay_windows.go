@@ -168,18 +168,21 @@ type overlayCmd struct {
 }
 
 type overlayWindow struct {
-	hwnd              uintptr
-	memDC             uintptr
-	memBitmap         uintptr
-	oldBitmap         uintptr
-	pixels            unsafe.Pointer
-	cursorImage       *image.NRGBA
-	width             int32
-	height            int32
-	lastPos           POINT
-	lastAlpha         byte
-	lastCommittedTime time.Time
-	frameCommitCount  uint64
+	hwnd                uintptr
+	memDC               uintptr
+	memBitmap           uintptr
+	oldBitmap           uintptr
+	pixels              unsafe.Pointer
+	cursorImage         *image.NRGBA
+	width               int32
+	height              int32
+	lastPos             POINT
+	lastAlpha           byte
+	lastAttemptTime     time.Time
+	lastCommitTime      time.Time
+	lastCommitSucceeded bool
+	frameAttemptCount   uint64
+	frameCommitCount    uint64
 
 	cmdChan chan overlayCmd
 }
@@ -303,8 +306,6 @@ func (w *overlayWindow) runMessageLoop(ready chan bool) {
 	procDestroyWindow.Call(w.hwnd)
 }
 
-// postCmdSync posts a command and synchronously blocks until the Win32 thread
-// finishes executing it and committing the frame.
 func (w *overlayWindow) postCmdSync(fn func()) {
 	if w == nil || w.hwnd == 0 {
 		return
@@ -334,7 +335,10 @@ func (w *overlayWindow) updateFrame(screenX, screenY float64, renderState Visual
 			AlphaFormat:         AC_SRC_ALPHA,
 		}
 
-		procUpdateLayeredWindow.Call(
+		w.lastAttemptTime = time.Now()
+		w.frameAttemptCount++
+
+		ret, _, _ := procUpdateLayeredWindow.Call(
 			w.hwnd,
 			0,
 			uintptr(unsafe.Pointer(&ptDst)),
@@ -345,31 +349,43 @@ func (w *overlayWindow) updateFrame(screenX, screenY float64, renderState Visual
 			uintptr(unsafe.Pointer(&blend)),
 			ULW_ALPHA,
 		)
-		w.lastCommittedTime = time.Now()
-		w.frameCommitCount++
+
+		if ret != 0 {
+			w.lastCommitSucceeded = true
+			w.lastCommitTime = w.lastAttemptTime
+			w.frameCommitCount++
+		} else {
+			w.lastCommitSucceeded = false
+		}
 	})
 }
 
 // setZOrder places the overlay immediately above targetHWND in Win32 Z-order.
-// In Win32 SetWindowPos semantics, inserting after `hWndInsertAfter` places
-// the window BELOW `hWndInsertAfter`. Thus, to place `hwnd` immediately ABOVE
-// `targetHWND`, `hWndInsertAfter` must be the predecessor of `targetHWND`
-// (`GetWindow(targetHWND, GW_HWNDPREV)`).
+// If GetWindow(targetRoot, GW_HWNDPREV) == w.hwnd, the overlay is ALREADY immediately above targetRoot,
+// so setZOrder returns early without modifying Z-order.
 func (w *overlayWindow) setZOrder(targetHWND uintptr) {
 	w.postCmdSync(func() {
-		var hwndInsertAfter uintptr = HWND_TOP
-		if targetHWND != 0 {
-			res, _, _ := procIsWindow.Call(targetHWND)
-			if res != 0 {
-				targetRoot := platformGetRootWindow(targetHWND)
-				prev, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
-				if prev != 0 && prev != w.hwnd {
-					hwndInsertAfter = prev
-				} else {
-					hwndInsertAfter = HWND_TOP
-				}
-			}
+		if targetHWND == 0 {
+			return
 		}
+		res, _, _ := procIsWindow.Call(targetHWND)
+		if res == 0 {
+			return
+		}
+
+		targetRoot := platformGetRootWindow(targetHWND)
+		prev, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
+		if prev == w.hwnd {
+			// Overlay is already directly above targetRoot!
+			// Preserve current Z-order and return without altering position.
+			return
+		}
+
+		var hwndInsertAfter uintptr = HWND_TOP
+		if prev != 0 {
+			hwndInsertAfter = prev
+		}
+
 		procSetWindowPos.Call(
 			w.hwnd,
 			hwndInsertAfter,
@@ -416,7 +432,6 @@ func (w *overlayWindow) fadeOut(durationMs int) {
 				break
 			}
 			t := float64(elapsed) / float64(dur)
-			// Smoothstep / EaseInEaseOut curve: t * t * (3 - 2 * t)
 			easedT := t * t * (3 - 2*t)
 			alpha := byte(math.Round((1.0 - easedT) * 255.0))
 			w.lastAlpha = alpha
@@ -428,7 +443,10 @@ func (w *overlayWindow) fadeOut(durationMs int) {
 				AlphaFormat:         AC_SRC_ALPHA,
 			}
 
-			procUpdateLayeredWindow.Call(
+			w.lastAttemptTime = time.Now()
+			w.frameAttemptCount++
+
+			ret, _, _ := procUpdateLayeredWindow.Call(
 				w.hwnd,
 				0,
 				uintptr(unsafe.Pointer(&ptDst)),
@@ -440,7 +458,15 @@ func (w *overlayWindow) fadeOut(durationMs int) {
 				ULW_ALPHA,
 			)
 
-			time.Sleep(time.Second / 120) // ~120Hz smooth animation loop
+			if ret != 0 {
+				w.lastCommitSucceeded = true
+				w.lastCommitTime = w.lastAttemptTime
+				w.frameCommitCount++
+			} else {
+				w.lastCommitSucceeded = false
+			}
+
+			time.Sleep(time.Second / 120)
 		}
 
 		procShowWindow.Call(w.hwnd, SW_HIDE)
@@ -456,8 +482,6 @@ func (w *overlayWindow) destroy() {
 
 // --- Win32 ABI Packing & Window Helpers ---
 
-// packPoint packs a Pt struct (two 32-bit int32 X and Y values) into a single 64-bit uintptr
-// matching Windows x64 ABI for passing POINT structs by value in a single register (RCX).
 func packPoint(pt Pt) uintptr {
 	x := uint32(int32(math.Round(pt.X)))
 	y := uint32(int32(math.Round(pt.Y)))

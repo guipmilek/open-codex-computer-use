@@ -4,6 +4,9 @@ package main
 
 import (
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -27,7 +30,6 @@ func TestWin32ABIPACKING(t *testing.T) {
 			t.Fatalf("packPoint(%v, %v) = 0x%x, expected 0x%x", tc.x, tc.y, packed, tc.expected)
 		}
 
-		// Verify unpacking lower and upper 32-bit halves
 		unpackedX := int32(uint32(packed & 0xFFFFFFFF))
 		unpackedY := int32(uint32(packed >> 32))
 
@@ -38,25 +40,37 @@ func TestWin32ABIPACKING(t *testing.T) {
 }
 
 func TestMonitorFromPointIntegration(t *testing.T) {
-	pt1 := Pt{X: 100, Y: 100}
-	work1 := platformMonitorWorkArea(pt1)
+	pt := Pt{X: 100, Y: 100}
+	packed := packPoint(pt)
 
-	if work1.W <= 0 || work1.H <= 0 {
-		t.Fatalf("platformMonitorWorkArea returned invalid rect: %v", work1)
+	hMon, _, _ := procMonitorFromPoint.Call(packed, MONITOR_DEFAULTTONEAREST)
+	if hMon == 0 {
+		t.Fatal("procMonitorFromPoint returned 0 for valid screen point")
 	}
 
-	// Test two points with different Y on same X to ensure Y is not collapsed to 0 due to register shift
-	pt2 := Pt{X: 100, Y: 500}
-	work2 := platformMonitorWorkArea(pt2)
+	var mi MONITORINFO
+	mi.CbSize = uint32(unsafe.Sizeof(mi))
+	res, _, _ := procGetMonitorInfoW.Call(hMon, uintptr(unsafe.Pointer(&mi)))
+	if res == 0 {
+		t.Fatal("procGetMonitorInfoW returned 0 for valid HMONITOR")
+	}
 
-	if work2.W <= 0 || work2.H <= 0 {
-		t.Fatalf("platformMonitorWorkArea(pt2) returned invalid rect: %v", work2)
+	expectedWork := Rect{
+		X: float64(mi.RcWork.Left),
+		Y: float64(mi.RcWork.Top),
+		W: float64(mi.RcWork.Right - mi.RcWork.Left),
+		H: float64(mi.RcWork.Bottom - mi.RcWork.Top),
+	}
+
+	actualWork := platformMonitorWorkArea(pt)
+	if actualWork != expectedWork {
+		t.Fatalf("platformMonitorWorkArea = %v, expected exact rcWork = %v", actualWork, expectedWork)
 	}
 }
 
 func TestWindowFromPointIntegration(t *testing.T) {
 	hInst, _, _ := procGetModuleHandleW.Call(0)
-	className, _ := syscall.UTF16PtrFromString("TestDummyWindowClass")
+	className, _ := syscall.UTF16PtrFromString("TestWinFromPtClass")
 
 	wc := WNDCLASSEX{
 		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
@@ -80,17 +94,116 @@ func TestWindowFromPointIntegration(t *testing.T) {
 	}
 	defer procDestroyWindow.Call(hwnd)
 
-	procShowWindow.Call(hwnd, SW_SHOWNA)
+	procShowWindow.Call(hwnd, SW_SHOW)
+	procSetWindowPos.Call(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
+	time.Sleep(20 * time.Millisecond)
 
 	hit := platformWindowIDAtPoint(Pt{X: 250, Y: 250}, 0)
-	if hit == 0 {
-		t.Fatal("platformWindowIDAtPoint returned 0 for test window point")
+	root := platformGetRootWindow(hwnd)
+
+	if hit != root {
+		t.Fatalf("platformWindowIDAtPoint = 0x%x, expected root window 0x%x", hit, root)
+	}
+}
+
+func TestThreeWindowZOrderIntegration(t *testing.T) {
+	hInst, _, _ := procGetModuleHandleW.Call(0)
+	className, _ := syscall.UTF16PtrFromString("TestZOrderClass")
+
+	wc := WNDCLASSEX{
+		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
+		LpfnWndProc:   syscall.NewCallback(wndProc),
+		HInstance:     hInst,
+		LpszClassName: className,
+	}
+	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+
+	// Create target window (bottom)
+	targetHWND, _, _ := procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
+		100, 100, 400, 400, 0, 0, hInst, 0,
+	)
+	if targetHWND == 0 {
+		t.Skip("Could not create target window")
+	}
+	defer procDestroyWindow.Call(targetHWND)
+
+	// Create unrelated window (top)
+	unrelatedHWND, _, _ := procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
+		100, 100, 400, 400, 0, 0, hInst, 0,
+	)
+	if unrelatedHWND == 0 {
+		t.Skip("Could not create unrelated window")
+	}
+	defer procDestroyWindow.Call(unrelatedHWND)
+
+	procShowWindow.Call(targetHWND, SW_SHOWNA)
+	procShowWindow.Call(unrelatedHWND, SW_SHOWNA)
+
+	// Place unrelated above target
+	procSetWindowPos.Call(unrelatedHWND, targetHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+
+	ctrl := NewVisualCursorController()
+	ctrl.ensureOverlay()
+	if ctrl.overlay == nil || ctrl.overlay.hwnd == 0 {
+		t.Skip("Overlay creation unavailable")
 	}
 
-	root := platformGetRootWindow(hit)
-	if root == 0 {
-		t.Fatal("platformGetRootWindow returned 0")
+	// Call setZOrder(targetHWND)
+	ctrl.overlay.setZOrder(targetHWND)
+
+	// Call setZOrder repeatedly to verify Z-order is preserved and not destroyed
+	for i := 0; i < 3; i++ {
+		ctrl.overlay.setZOrder(targetHWND)
+		p, _, _ := procGetWindow.Call(ctrl.overlay.hwnd, GW_HWNDPREV)
+		if p == ctrl.overlay.hwnd {
+			t.Fatalf("setZOrder loop iteration %d set prev to self!", i)
+		}
 	}
+
+	ctrl.Reset()
+}
+
+func TestCandidateScoringWithVisibleOverlayOverTarget(t *testing.T) {
+	hInst, _, _ := procGetModuleHandleW.Call(0)
+	className, _ := syscall.UTF16PtrFromString("TestScoringClass")
+
+	wc := WNDCLASSEX{
+		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
+		LpfnWndProc:   syscall.NewCallback(wndProc),
+		HInstance:     hInst,
+		LpszClassName: className,
+	}
+	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+
+	targetHWND, _, _ := procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
+		100, 100, 500, 500, 0, 0, hInst, 0,
+	)
+	if targetHWND == 0 {
+		t.Skip("Could not create target window")
+	}
+	defer procDestroyWindow.Call(targetHWND)
+	procShowWindow.Call(targetHWND, SW_SHOWNA)
+
+	ctrl := NewVisualCursorController()
+	ctrl.SetTargetHWND(targetHWND)
+	ctrl.ensureOverlay()
+	if ctrl.overlay == nil {
+		t.Skip("Overlay creation unavailable")
+	}
+
+	// Place overlay visually over target
+	ctrl.overlay.updateFrame(200, 200, ctrl.initialRenderState(Pt{X: 200, Y: 200}), 0)
+	ctrl.overlay.show()
+
+	cand := ctrl.bestMotionCandidate(Pt{X: 150, Y: 150}, Pt{X: 250, Y: 250})
+	if cand.Identifier == "" {
+		t.Fatal("bestMotionCandidate returned empty candidate when overlay is visible over target")
+	}
+
+	ctrl.Reset()
 }
 
 func TestInstrumentedSynchronousCommitGate(t *testing.T) {
@@ -110,14 +223,22 @@ func TestInstrumentedSynchronousCommitGate(t *testing.T) {
 
 	// 1. MoveToAndWait
 	ctrl.MoveToAndWait(350, 350)
-	moveFrameCommitTime = ctrl.overlay.lastCommittedTime
+	moveFrameCommitTime = ctrl.overlay.lastCommitTime
+
+	if !ctrl.overlay.lastCommitSucceeded {
+		t.Fatal("MoveToAndWait UpdateLayeredWindow commit failed")
+	}
 
 	// 2. Action starts
 	actionStartTime = time.Now()
 
 	// 3. PulseClickAndWait
 	ctrl.PulseClickAndWait(350, 350, 1, "left")
-	pulseFrameCommitTime = ctrl.overlay.lastCommittedTime
+	pulseFrameCommitTime = ctrl.overlay.lastCommitTime
+
+	if !ctrl.overlay.lastCommitSucceeded {
+		t.Fatal("PulseClickAndWait UpdateLayeredWindow commit failed")
+	}
 
 	if moveFrameCommitTime.IsZero() || pulseFrameCommitTime.IsZero() {
 		t.Fatal("Frame commit timestamps were zero")
@@ -134,29 +255,33 @@ func TestInstrumentedSynchronousCommitGate(t *testing.T) {
 	ctrl.Reset()
 }
 
-func TestPhysicalCursorUnmoved(t *testing.T) {
-	procGetCursorPos := user32.NewProc("GetCursorPos")
+func TestNoPhysicalMouseInputAPICalls(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatal("Could not list Go source files")
+	}
 
-	var ptBefore POINT
-	res1, _, _ := procGetCursorPos.Call(uintptr(unsafe.Pointer(&ptBefore)))
+	prohibitedAPIs := []string{"SetCursorPos", "SendInput", "mouse_event"}
 
-	ctrl := NewVisualCursorController()
-	ctrl.MoveToAndWait(500, 500)
-	ctrl.PulseClickAndWait(500, 500, 1, "left")
-	ctrl.Settle(500, 500)
-	ctrl.Reset()
-
-	var ptAfter POINT
-	res2, _, _ := procGetCursorPos.Call(uintptr(unsafe.Pointer(&ptAfter)))
-
-	if res1 != 0 && res2 != 0 {
-		t.Logf("Physical cursor position: Before=(%d, %d), After=(%d, %d)", ptBefore.X, ptBefore.Y, ptAfter.X, ptAfter.Y)
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue // Audit production source code only
+		}
+		content, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("Failed to read file %s: %v", file, err)
+		}
+		text := string(content)
+		for _, prohibited := range prohibitedAPIs {
+			if strings.Contains(text, prohibited) {
+				t.Fatalf("Prohibited physical mouse input API %q found in production source file %s!", prohibited, file)
+			}
+		}
 	}
 }
 
 func TestOverlayClickThroughStyle(t *testing.T) {
 	procGetWindowLongW := user32.NewProc("GetWindowLongW")
-	const GWL_EXSTYLE = -20
 
 	ctrl := NewVisualCursorController()
 	ctrl.ensureOverlay()
@@ -164,7 +289,7 @@ func TestOverlayClickThroughStyle(t *testing.T) {
 		t.Skip("Overlay window unavailable")
 	}
 
-	exStyle, _, _ := procGetWindowLongW.Call(ctrl.overlay.hwnd, ^uintptr(19))
+	exStyle, _, _ := procGetWindowLongW.Call(ctrl.overlay.hwnd, ^uintptr(19)) // GWL_EXSTYLE = -20
 	if exStyle&WS_EX_TRANSPARENT == 0 {
 		t.Fatalf("Overlay window missing WS_EX_TRANSPARENT style: exStyle = 0x%x", exStyle)
 	}

@@ -49,8 +49,28 @@ public static class OCUWin32 {
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessage(IntPtr hWnd, UInt32 msg, IntPtr wParam, string lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetThreadDpiAwarenessContext();
+
+    [DllImport("user32.dll")]
+    public static extern bool AreDpiAwarenessContextsEqual(IntPtr ctx1, IntPtr ctx2);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
 }
 "@
+
+try {
+    $PMv2 = [IntPtr]::new(-4)
+    $setOk = [OCUWin32]::SetThreadDpiAwarenessContext($PMv2)
+    if (-not $setOk) {
+        [void][OCUWin32]::SetProcessDPIAware()
+    }
+} catch {}
 
 $WM_SETTEXT = 0x000C
 $WM_MOUSEMOVE = 0x0200
