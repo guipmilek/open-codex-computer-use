@@ -17,25 +17,28 @@ var (
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
 
-	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
-	procDestroyWindow       = user32.NewProc("DestroyWindow")
-	procShowWindow          = user32.NewProc("ShowWindow")
-	procSetWindowPos        = user32.NewProc("SetWindowPos")
-	procUpdateLayeredWindow = user32.NewProc("UpdateLayeredWindow")
-	procGetDC               = user32.NewProc("GetDC")
-	procReleaseDC           = user32.NewProc("ReleaseDC")
-	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
-	procGetMessageW         = user32.NewProc("GetMessageW")
-	procTranslateMessage    = user32.NewProc("TranslateMessage")
-	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
-	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
-	procPostMessageW        = user32.NewProc("PostMessageW")
-	procGetWindow           = user32.NewProc("GetWindow")
-	procIsWindow            = user32.NewProc("IsWindow")
-	procWindowFromPoint     = user32.NewProc("WindowFromPoint")
-	procMonitorFromPoint    = user32.NewProc("MonitorFromPoint")
-	procGetMonitorInfoW     = user32.NewProc("GetMonitorInfoW")
+	procRegisterClassExW              = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW               = user32.NewProc("CreateWindowExW")
+	procDestroyWindow                 = user32.NewProc("DestroyWindow")
+	procShowWindow                    = user32.NewProc("ShowWindow")
+	procSetWindowPos                  = user32.NewProc("SetWindowPos")
+	procUpdateLayeredWindow           = user32.NewProc("UpdateLayeredWindow")
+	procGetDC                         = user32.NewProc("GetDC")
+	procReleaseDC                     = user32.NewProc("ReleaseDC")
+	procDefWindowProcW                = user32.NewProc("DefWindowProcW")
+	procGetMessageW                   = user32.NewProc("GetMessageW")
+	procTranslateMessage              = user32.NewProc("TranslateMessage")
+	procDispatchMessageW              = user32.NewProc("DispatchMessageW")
+	procPostQuitMessage               = user32.NewProc("PostQuitMessage")
+	procPostMessageW                  = user32.NewProc("PostMessageW")
+	procGetWindow                     = user32.NewProc("GetWindow")
+	procIsWindow                      = user32.NewProc("IsWindow")
+	procWindowFromPoint               = user32.NewProc("WindowFromPoint")
+	procMonitorFromPoint              = user32.NewProc("MonitorFromPoint")
+	procGetMonitorInfoW               = user32.NewProc("GetMonitorInfoW")
+	procGetAncestor                   = user32.NewProc("GetAncestor")
+	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
+	procSetProcessDPIAware            = user32.NewProc("SetProcessDPIAware")
 
 	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
 	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
@@ -57,6 +60,7 @@ const (
 	HWND_TOPMOST   = ^uintptr(0) // -1
 	SWP_NOSIZE     = 0x0001
 	SWP_NOMOVE     = 0x0002
+	SWP_NOZORDER   = 0x0004
 	SWP_NOACTIVATE = 0x0010
 	SWP_SHOWWINDOW = 0x0040
 	SW_SHOWNA      = 8
@@ -71,9 +75,23 @@ const (
 	WM_QUIT = 0x0012
 
 	GW_HWNDPREV = 3
+	GA_ROOT     = 2
 
-	MONITOR_DEFAULTTONEAREST = 2
+	MONITOR_DEFAULTTONEAREST                   = 2
+	DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ^uintptr(3) // -4
 )
+
+func init() {
+	initDPIAwareness()
+}
+
+func initDPIAwareness() {
+	if procSetProcessDpiAwarenessContext.Find() == nil {
+		procSetProcessDpiAwarenessContext.Call(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+	} else if procSetProcessDPIAware.Find() == nil {
+		procSetProcessDPIAware.Call()
+	}
+}
 
 type POINT struct {
 	X, Y int32
@@ -150,16 +168,18 @@ type overlayCmd struct {
 }
 
 type overlayWindow struct {
-	hwnd        uintptr
-	memDC       uintptr
-	memBitmap   uintptr
-	oldBitmap   uintptr
-	pixels      unsafe.Pointer
-	cursorImage *image.NRGBA
-	width       int32
-	height      int32
-	lastPos     POINT
-	lastAlpha   byte
+	hwnd              uintptr
+	memDC             uintptr
+	memBitmap         uintptr
+	oldBitmap         uintptr
+	pixels            unsafe.Pointer
+	cursorImage       *image.NRGBA
+	width             int32
+	height            int32
+	lastPos           POINT
+	lastAlpha         byte
+	lastCommittedTime time.Time
+	frameCommitCount  uint64
 
 	cmdChan chan overlayCmd
 }
@@ -325,6 +345,8 @@ func (w *overlayWindow) updateFrame(screenX, screenY float64, renderState Visual
 			uintptr(unsafe.Pointer(&blend)),
 			ULW_ALPHA,
 		)
+		w.lastCommittedTime = time.Now()
+		w.frameCommitCount++
 	})
 }
 
@@ -339,8 +361,9 @@ func (w *overlayWindow) setZOrder(targetHWND uintptr) {
 		if targetHWND != 0 {
 			res, _, _ := procIsWindow.Call(targetHWND)
 			if res != 0 {
-				prev, _, _ := procGetWindow.Call(targetHWND, GW_HWNDPREV)
-				if prev != 0 {
+				targetRoot := platformGetRootWindow(targetHWND)
+				prev, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
+				if prev != 0 && prev != w.hwnd {
 					hwndInsertAfter = prev
 				} else {
 					hwndInsertAfter = HWND_TOP
@@ -356,14 +379,14 @@ func (w *overlayWindow) setZOrder(targetHWND uintptr) {
 	})
 }
 
-// show shows the overlay using SWP_SHOWWINDOW and SWP_NOACTIVATE (never activates or steals focus).
+// show displays the overlay preserving existing Z-order (SWP_NOZORDER) and without focus activation (SWP_NOACTIVATE).
 func (w *overlayWindow) show() {
 	w.postCmdSync(func() {
 		procSetWindowPos.Call(
 			w.hwnd,
 			0,
 			0, 0, 0, 0,
-			SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW,
+			SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_SHOWWINDOW,
 		)
 	})
 }
@@ -376,19 +399,26 @@ func (w *overlayWindow) hide() {
 	})
 }
 
-// fadeOut animates alpha from 255 down to 0 over durationMs (120ms) with easing,
+// fadeOut animates alpha from 255 down to 0 over durationMs (120ms) using an easeInEaseOut curve,
 // then hides the window.
 func (w *overlayWindow) fadeOut(durationMs int) {
 	w.postCmdSync(func() {
-		steps := 12
-		stepDuration := time.Duration(durationMs/steps) * time.Millisecond
+		startTime := time.Now()
+		dur := time.Duration(durationMs) * time.Millisecond
 
 		ptDst := w.lastPos
 		sizeDst := SIZE{CX: w.width, CY: w.height}
 		ptSrc := POINT{X: 0, Y: 0}
 
-		for i := steps; i >= 0; i-- {
-			alpha := byte((i * 255) / steps)
+		for {
+			elapsed := time.Since(startTime)
+			if elapsed >= dur {
+				break
+			}
+			t := float64(elapsed) / float64(dur)
+			// Smoothstep / EaseInEaseOut curve: t * t * (3 - 2 * t)
+			easedT := t * t * (3 - 2*t)
+			alpha := byte(math.Round((1.0 - easedT) * 255.0))
 			w.lastAlpha = alpha
 
 			blend := BLENDFUNCTION{
@@ -410,7 +440,7 @@ func (w *overlayWindow) fadeOut(durationMs int) {
 				ULW_ALPHA,
 			)
 
-			time.Sleep(stepDuration)
+			time.Sleep(time.Second / 120) // ~120Hz smooth animation loop
 		}
 
 		procShowWindow.Call(w.hwnd, SW_HIDE)
@@ -424,13 +454,20 @@ func (w *overlayWindow) destroy() {
 	})
 }
 
-// --- Win32 Monitor & Work Area Helpers ---
+// --- Win32 ABI Packing & Window Helpers ---
+
+// packPoint packs a Pt struct (two 32-bit int32 X and Y values) into a single 64-bit uintptr
+// matching Windows x64 ABI for passing POINT structs by value in a single register (RCX).
+func packPoint(pt Pt) uintptr {
+	x := uint32(int32(math.Round(pt.X)))
+	y := uint32(int32(math.Round(pt.Y)))
+	return uintptr(x) | (uintptr(y) << 32)
+}
 
 func platformMonitorWorkArea(pt Pt) Rect {
-	winPt := POINT{X: int32(math.Round(pt.X)), Y: int32(math.Round(pt.Y))}
+	packed := packPoint(pt)
 	hMon, _, _ := procMonitorFromPoint.Call(
-		uintptr(winPt.X),
-		uintptr(winPt.Y),
+		packed,
 		MONITOR_DEFAULTTONEAREST,
 	)
 
@@ -453,8 +490,22 @@ func platformMonitorWorkArea(pt Pt) Rect {
 	}
 }
 
-func platformWindowIDAtPoint(pt Pt) uintptr {
-	winPt := POINT{X: int32(math.Round(pt.X)), Y: int32(math.Round(pt.Y))}
-	hwnd, _, _ := procWindowFromPoint.Call(uintptr(winPt.X), uintptr(winPt.Y))
+func platformWindowIDAtPoint(pt Pt, excludeHWND uintptr) uintptr {
+	packed := packPoint(pt)
+	hwnd, _, _ := procWindowFromPoint.Call(packed)
+	if hwnd == 0 || hwnd == excludeHWND {
+		return 0
+	}
+	return platformGetRootWindow(hwnd)
+}
+
+func platformGetRootWindow(hwnd uintptr) uintptr {
+	if hwnd == 0 {
+		return 0
+	}
+	root, _, _ := procGetAncestor.Call(hwnd, GA_ROOT)
+	if root != 0 {
+		return root
+	}
 	return hwnd
 }

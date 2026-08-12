@@ -5,45 +5,69 @@ import (
 	"testing"
 )
 
-func TestReferenceTransformInverseRotationAndPulse(t *testing.T) {
-	width := 126.0
-	height := 126.0
+// forwardReferenceTransform performs the exact forward transform matching Swift SoftwareCursorGlyphRenderer.drawReferenceImage:
+//
+//	T(origin) * R(rotation) * S(scaleX, scaleY) * T(-center)
+func forwardReferenceTransform(srcX, srcY float64, width, height float64, state VisualRenderState, clickProgress float64) (float64, float64) {
+	motionCompression := math.Min(math.Hypot(state.CursorBodyOffDx, state.CursorBodyOffDy)*0.008, 0.018)
+	pulseCompression := clickProgress * 0.03
+	scaleX := 1.0 - motionCompression - pulseCompression
+	scaleY := 1.0 + (pulseCompression * 0.4)
+
+	angleRad := state.Rotation
+	cosA := math.Cos(angleRad)
+	sinA := math.Sin(angleRad)
+
 	cx := width / 2.0
 	cy := height / 2.0
 
-	// 1. Identity transform at center should map center to center
-	stateZero := VisualRenderState{
-		Rotation:        0,
-		CursorBodyOffDx: 0,
-		CursorBodyOffDy: 0,
-	}
-	sx, sy := computeReferenceTransformInverse(cx, cy, width, height, stateZero, 0)
-	if math.Abs(sx-cx) > 0.001 || math.Abs(sy-cy) > 0.001 {
-		t.Fatalf("Center mapping = (%v, %v), expected (%v, %v)", sx, sy, cx, cy)
-	}
+	// 1. Shift source point relative to source canvas center
+	px := srcX - cx
+	py := srcY - cy
 
-	// 2. Rotation in radians (e.g. math.Pi / 2 = 90 deg counter-clockwise)
-	stateRot := VisualRenderState{
-		Rotation:        math.Pi / 2,
-		CursorBodyOffDx: 0,
-		CursorBodyOffDy: 0,
-	}
-	// A point to the right of center (cx + 10, cy) unrotated should come from (cx, cy - 10)
-	sxRot, syRot := computeReferenceTransformInverse(cx+10, cy, width, height, stateRot, 0)
-	if math.Abs(sxRot-cx) > 0.001 || math.Abs(syRot-(cy-10)) > 0.001 {
-		t.Fatalf("90 deg rotation mapping = (%v, %v), expected (%v, %v)", sxRot, syRot, cx, cy-10)
-	}
+	// 2. Scale
+	scaledX := px * scaleX
+	scaledY := py * scaleY
 
-	// 3. Pulse compression scale
+	// 3. Rotate R(angle)
+	rotX := scaledX*cosA - scaledY*sinA
+	rotY := scaledX*sinA + scaledY*cosA
+
+	// 4. Translate to transform origin (center + cursorBodyOffset)
+	originX := cx + state.CursorBodyOffDx
+	originY := cy + state.CursorBodyOffDy
+
+	return rotX + originX, rotY + originY
+}
+
+func TestGoldenInverseTransformMatchesForward(t *testing.T) {
+	width := 126.0
+	height := 126.0
+
+	state := VisualRenderState{
+		Rotation:        math.Pi / 4, // 45 degrees in radians
+		CursorBodyOffDx: 10.0,
+		CursorBodyOffDy: -5.0,
+	}
 	clickProgress := 1.0
-	pulseCompression := clickProgress * 0.03
-	scaleX := 1.0 - pulseCompression
-	scaleY := 1.0 + (pulseCompression * 0.4)
 
-	sxPulse, syPulse := computeReferenceTransformInverse(cx+10, cy+10, width, height, stateZero, clickProgress)
-	expectedSx := (10 / scaleX) + cx
-	expectedSy := (10 / scaleY) + cy
-	if math.Abs(sxPulse-expectedSx) > 0.001 || math.Abs(syPulse-expectedSy) > 0.001 {
-		t.Fatalf("Pulse compression mapping = (%v, %v), expected (%v, %v)", sxPulse, syPulse, expectedSx, expectedSy)
+	testPoints := []Pt{
+		{X: 63, Y: 63},
+		{X: 10, Y: 20},
+		{X: 100, Y: 80},
+		{X: 60.35, Y: 70.3},
+	}
+
+	for _, pt := range testPoints {
+		// Forward transform: src -> dst
+		dstX, dstY := forwardReferenceTransform(pt.X, pt.Y, width, height, state, clickProgress)
+
+		// Inverse transform: dst -> src'
+		computedSrcX, computedSrcY := computeReferenceTransformInverse(dstX, dstY, width, height, state, clickProgress)
+
+		if math.Abs(computedSrcX-pt.X) > 0.0001 || math.Abs(computedSrcY-pt.Y) > 0.0001 {
+			t.Fatalf("Inverse transform mismatch for point %v: got (%v, %v), want (%v, %v)",
+				pt, computedSrcX, computedSrcY, pt.X, pt.Y)
+		}
 	}
 }

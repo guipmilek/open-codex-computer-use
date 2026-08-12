@@ -48,20 +48,26 @@ func loadCursorImage() *image.NRGBA {
 	return res
 }
 
-// computeReferenceTransformInverse computes the inverse 2D affine mapping
-// matching Swift SoftwareCursorGlyphRenderer.drawReferenceImage.
-// Returns (srcX, srcY) in 126x126 space for target pixel (x, y).
+// computeReferenceTransformInverse computes the exact inverse 2D affine mapping
+// matching Swift SoftwareCursorGlyphRenderer.drawReferenceImage:
+//
+//	Forward transform: T(origin) * R(rotation) * S(scaleX, scaleY) * T(-center)
+//	Inverse transform:
+//	  1. dx = x - origin.x, dy = y - origin.y  (subtract transform origin)
+//	  2. unrotX = dx*cos(rot) + dy*sin(rot), unrotY = -dx*sin(rot) + dy*cos(rot) (inverse rotation)
+//	  3. unscaleX = unrotX / scaleX, unscaleY = unrotY / scaleY (divide scale)
+//	  4. srcX = unscaleX + center.x, srcY = unscaleY + center.y (add source center)
 func computeReferenceTransformInverse(x, y float64, width, height float64, state VisualRenderState, clickProgress float64) (float64, float64) {
 	motionCompression := math.Min(math.Hypot(state.CursorBodyOffDx, state.CursorBodyOffDy)*0.008, 0.018)
 	pulseCompression := clickProgress * 0.03
 	scaleX := 1.0 - motionCompression - pulseCompression
 	scaleY := 1.0 + (pulseCompression * 0.4)
 
-	if scaleX <= 0 {
-		scaleX = 0.001
+	if scaleX <= 0.0001 {
+		scaleX = 0.0001
 	}
-	if scaleY <= 0 {
-		scaleY = 0.001
+	if scaleY <= 0.0001 {
+		scaleY = 0.0001
 	}
 
 	angleRad := state.Rotation // Directly in radians, matching Swift
@@ -71,24 +77,24 @@ func computeReferenceTransformInverse(x, y float64, width, height float64, state
 	cx := width / 2.0
 	cy := height / 2.0
 
-	// Center of transform includes cursorBodyOffset
+	// Transform origin is bounds.mid + cursorBodyOffset
 	originX := cx + state.CursorBodyOffDx
 	originY := cy + state.CursorBodyOffDy
 
-	// Shift target pixel relative to transform origin
+	// 1. Subtract transform origin
 	dx := x - originX
 	dy := y - originY
 
-	// Unscale
-	dx /= scaleX
-	dy /= scaleY
+	// 2. Inverse rotation R(-angle)
+	unrotX := dx*cosA + dy*sinA
+	unrotY := -dx*sinA + dy*cosA
 
-	// Unrotate (inverse rotation matrix)
-	sx := dx*cosA + dy*sinA
-	sy := -dx*sinA + dy*cosA
+	// 3. Divide scale S^-1
+	unscaleX := unrotX / scaleX
+	unscaleY := unrotY / scaleY
 
-	// Back to canvas center
-	return sx + cx, sy + cy
+	// 4. Add canvas center
+	return unscaleX + cx, unscaleY + cy
 }
 
 func renderCursorToDIB(pixels unsafe.Pointer, width, height int32, src *image.NRGBA, state VisualRenderState, clickProgress float64) {
@@ -105,8 +111,8 @@ func renderCursorToDIB(pixels unsafe.Pointer, width, height int32, src *image.NR
 		for x := 0; x < int(width); x++ {
 			sx, sy := computeReferenceTransformInverse(float64(x), float64(y), w, h, state, clickProgress)
 
-			srcX := int(sx + 0.5)
-			srcY := int(sy + 0.5)
+			srcX := int(math.Floor(sx + 0.5))
+			srcY := int(math.Floor(sy + 0.5))
 
 			if srcX >= 0 && srcX < 126 && srcY >= 0 && srcY < 126 {
 				srcIdx := (srcY*126 + srcX) * 4

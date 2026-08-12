@@ -321,6 +321,12 @@ func (c *VisualCursorController) bestMotionCandidate(start, end Pt) MotionCandid
 	}
 
 	// Score candidates based on constraint points that hit the target window
+	excludeHWND := uintptr(0)
+	if c.overlay != nil {
+		excludeHWND = c.overlay.hwnd
+	}
+	targetRoot := platformGetRootWindow(c.targetHWND)
+
 	type evalResult struct {
 		candidate MotionCandidate
 		hitCount  int
@@ -331,8 +337,8 @@ func (c *VisualCursorController) bestMotionCandidate(start, end Pt) MotionCandid
 		pts := cand.Path.SampledConstraintPoints(10)
 		hits := 0
 		for _, pt := range pts {
-			wnd := platformWindowIDAtPoint(pt)
-			if wnd == c.targetHWND {
+			wnd := platformWindowIDAtPoint(pt, excludeHWND)
+			if wnd != 0 && wnd == targetRoot {
 				hits++
 			}
 		}

@@ -17,6 +17,10 @@ func platformMonitorWorkArea(pt Pt) Rect {
 	return Rect{X: 0, Y: 0, W: 1920, H: 1080}
 }
 
-func platformWindowIDAtPoint(pt Pt) uintptr {
+func platformWindowIDAtPoint(pt Pt, excludeHWND uintptr) uintptr {
 	return 0
+}
+
+func platformGetRootWindow(hwnd uintptr) uintptr {
+	return hwnd
 }
