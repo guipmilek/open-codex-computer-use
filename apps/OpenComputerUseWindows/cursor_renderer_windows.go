@@ -48,6 +48,49 @@ func loadCursorImage() *image.NRGBA {
 	return res
 }
 
+// computeReferenceTransformInverse computes the inverse 2D affine mapping
+// matching Swift SoftwareCursorGlyphRenderer.drawReferenceImage.
+// Returns (srcX, srcY) in 126x126 space for target pixel (x, y).
+func computeReferenceTransformInverse(x, y float64, width, height float64, state VisualRenderState, clickProgress float64) (float64, float64) {
+	motionCompression := math.Min(math.Hypot(state.CursorBodyOffDx, state.CursorBodyOffDy)*0.008, 0.018)
+	pulseCompression := clickProgress * 0.03
+	scaleX := 1.0 - motionCompression - pulseCompression
+	scaleY := 1.0 + (pulseCompression * 0.4)
+
+	if scaleX <= 0 {
+		scaleX = 0.001
+	}
+	if scaleY <= 0 {
+		scaleY = 0.001
+	}
+
+	angleRad := state.Rotation // Directly in radians, matching Swift
+	cosA := math.Cos(angleRad)
+	sinA := math.Sin(angleRad)
+
+	cx := width / 2.0
+	cy := height / 2.0
+
+	// Center of transform includes cursorBodyOffset
+	originX := cx + state.CursorBodyOffDx
+	originY := cy + state.CursorBodyOffDy
+
+	// Shift target pixel relative to transform origin
+	dx := x - originX
+	dy := y - originY
+
+	// Unscale
+	dx /= scaleX
+	dy /= scaleY
+
+	// Unrotate (inverse rotation matrix)
+	sx := dx*cosA + dy*sinA
+	sy := -dx*sinA + dy*cosA
+
+	// Back to canvas center
+	return sx + cx, sy + cy
+}
+
 func renderCursorToDIB(pixels unsafe.Pointer, width, height int32, src *image.NRGBA, state VisualRenderState, clickProgress float64) {
 	size := int(width * height * 4)
 	bytesSlice := unsafe.Slice((*byte)(pixels), size)
@@ -55,32 +98,15 @@ func renderCursorToDIB(pixels unsafe.Pointer, width, height int32, src *image.NR
 		bytesSlice[i] = 0
 	}
 
-	scale := 1.0 + clickProgress*0.03
-	angleRad := state.Rotation * math.Pi / 180.0
-	cosA := math.Cos(angleRad)
-	sinA := math.Sin(angleRad)
-
-	cx := float64(width) / 2.0
-	cy := float64(height) / 2.0
+	w := float64(width)
+	h := float64(height)
 
 	for y := 0; y < int(height); y++ {
 		for x := 0; x < int(width); x++ {
-			dx := float64(x) - cx
-			dy := float64(y) - cy
+			sx, sy := computeReferenceTransformInverse(float64(x), float64(y), w, h, state, clickProgress)
 
-			dx /= scale
-			dy /= scale
-
-			sx := dx*cosA + dy*sinA
-			sy := -dx*sinA + dy*cosA
-
-			sx -= state.CursorBodyOffDx
-			sy -= state.CursorBodyOffDy
-			sx -= state.FogOffDx
-			sy -= state.FogOffDy
-
-			srcX := int(sx + cx + 0.5)
-			srcY := int(sy + cy + 0.5)
+			srcX := int(sx + 0.5)
+			srcY := int(sy + 0.5)
 
 			if srcX >= 0 && srcX < 126 && srcY >= 0 && srcY < 126 {
 				srcIdx := (srcY*126 + srcX) * 4
@@ -90,9 +116,7 @@ func renderCursorToDIB(pixels unsafe.Pointer, width, height int32, src *image.NR
 				a := uint32(src.Pix[srcIdx+3])
 
 				if a > 0 {
-					if state.FogOpacity > 0 {
-						a = uint32(float64(a) * (1.0 - state.FogOpacity))
-					}
+					// Premultiplied BGRA for Windows UpdateLayeredWindow
 					r = (r * a) / 255
 					g = (g * a) / 255
 					b = (b * a) / 255

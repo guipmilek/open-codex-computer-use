@@ -18,8 +18,6 @@ type VisualCursorController struct {
 	displayedTip        *Pt // nil if cursor has never been shown or was reset
 	restingTip          *Pt // where the cursor should idle
 	visualDynamicsState *VisualDynamicsState
-	currentForwardDx    float64 // current cursor forward heading
-	currentForwardDy    float64
 	idleTimer           *time.Timer
 	hideTimer           *time.Timer
 	idlePhase           float64
@@ -44,7 +42,7 @@ func NewVisualCursorController() *VisualCursorController {
 const (
 	cursorTipAnchorX  = 60.35
 	cursorTipAnchorY  = 70.3
-	cursorWindowSize  = 126
+	cursorWindowSize  = 126.0
 	neutralHeading    = -(3 * math.Pi / 4) // -3π/4, matching macOS
 	idleAmplitude     = 0.09
 	idleTimeout       = 30 * time.Second
@@ -72,8 +70,7 @@ func defaultInitialTipPosition() Pt {
 	return Pt{X: cursorTipAnchorX, Y: cursorTipAnchorY}
 }
 
-// restingForwardVector returns the default cursor forward vector
-// (the direction the cursor "faces" at rest).
+// restingForwardVector returns the default cursor forward vector.
 func restingForwardVector() Vec2 {
 	return Vec2{Dx: math.Cos(neutralHeading), Dy: math.Sin(neutralHeading)}
 }
@@ -81,7 +78,6 @@ func restingForwardVector() Vec2 {
 // currentForwardVector returns the cursor's current forward direction
 // based on its last render rotation.
 func (c *VisualCursorController) currentForwardVector() Vec2 {
-	// If we have dynamics state, derive forward from the current rotation.
 	if c.visualDynamicsState != nil {
 		angle := neutralHeading + c.visualDynamicsState.Angle
 		return Vec2{Dx: math.Cos(angle), Dy: math.Sin(angle)}
@@ -96,6 +92,9 @@ func (c *VisualCursorController) ensureOverlay() {
 	}
 	c.initialized = true
 	c.overlay = platformCreateOverlay()
+	if c.overlay != nil && c.targetHWND != 0 {
+		c.overlay.setZOrder(c.targetHWND)
+	}
 }
 
 // MoveToAndWait animates the cursor from its current position to the target
@@ -115,8 +114,9 @@ func (c *VisualCursorController) MoveToAndWait(screenX, screenY float64) {
 
 	c.stopIdleAnimation()
 	c.cancelPendingHide()
+	c.refreshActiveOrderingIfNeeded()
 
-	target := Pt{X: screenX, Y: screenY}
+	target := c.clampTipPosition(Pt{X: screenX, Y: screenY})
 	isFreshStart := c.displayedTip == nil
 	startPoint := defaultInitialTipPosition()
 	if !isFreshStart {
@@ -160,7 +160,8 @@ func (c *VisualCursorController) PulseClickAndWait(screenX, screenY float64, cli
 		return
 	}
 
-	target := Pt{X: screenX, Y: screenY}
+	c.refreshActiveOrderingIfNeeded()
+	target := c.clampTipPosition(Pt{X: screenX, Y: screenY})
 	now := timeNow()
 	c.seedVisualDynamicsIfNeeded(target, now)
 	c.restingTip = &target
@@ -218,7 +219,8 @@ func (c *VisualCursorController) Settle(screenX, screenY float64) {
 		return
 	}
 
-	target := Pt{X: screenX, Y: screenY}
+	c.refreshActiveOrderingIfNeeded()
+	target := c.clampTipPosition(Pt{X: screenX, Y: screenY})
 	c.restingTip = &target
 
 	rs := c.advanceVisualDynamics(target, 0, timeNow())
@@ -257,25 +259,113 @@ func (c *VisualCursorController) SetTargetHWND(hwnd uintptr) {
 	}
 }
 
-// --- Internal animation helpers ---
+// --- Internal animation & math helpers ---
 
-func (c *VisualCursorController) animateMove(start, end Pt) {
+func (c *VisualCursorController) clampTipPosition(tip Pt) Pt {
+	workArea := platformMonitorWorkArea(tip)
+	minX := workArea.MinX() + cursorTipAnchorX
+	maxX := workArea.MaxX() - (cursorWindowSize - cursorTipAnchorX)
+	minY := workArea.MinY() + cursorTipAnchorY
+	maxY := workArea.MaxY() - (cursorWindowSize - cursorTipAnchorY)
+
+	return Pt{
+		X: clampF(tip.X, minX, maxX),
+		Y: clampF(tip.Y, minY, maxY),
+	}
+}
+
+func (c *VisualCursorController) motionBounds(start, end Pt) *Rect {
+	startArea := platformMonitorWorkArea(start)
+	endArea := platformMonitorWorkArea(end)
+
+	minX := math.Min(startArea.MinX(), endArea.MinX())
+	maxX := math.Max(startArea.MaxX(), endArea.MaxX())
+	minY := math.Min(startArea.MinY(), endArea.MinY())
+	maxY := math.Max(startArea.MaxY(), endArea.MaxY())
+
+	return &Rect{
+		X: minX,
+		Y: minY,
+		W: maxX - minX,
+		H: maxY - minY,
+	}
+}
+
+func (c *VisualCursorController) refreshActiveOrderingIfNeeded() {
+	if c.overlay != nil && c.targetHWND != 0 {
+		c.overlay.setZOrder(c.targetHWND)
+	}
+}
+
+func (c *VisualCursorController) bestMotionCandidate(start, end Pt) MotionCandidate {
+	bounds := c.motionBounds(start, end)
 	startForward := c.currentForwardVector()
 	endForward := restingForwardVector()
 
-	candidates := MakeHeadingDrivenCandidates(start, end, nil, startForward, endForward)
-	candidate := ChooseHeadingDrivenBestCandidate(candidates)
-	if candidate == nil {
-		// Fallback: straight line
+	candidates := MakeHeadingDrivenCandidates(start, end, bounds, startForward, endForward)
+	defaultCandidate := ChooseHeadingDrivenBestCandidate(candidates)
+	if defaultCandidate == nil {
 		path := NewMotionPathSimple(start, end)
-		candidate = &MotionCandidate{
-			Identifier:  "fallback",
+		fallback := MotionCandidate{
+			Identifier:  "legacy-fallback",
 			Kind:        "base",
 			Path:        path,
-			Measurement: path.Measure(nil, 0.01),
+			Measurement: path.Measure(bounds, 0.01),
+			Score:       0,
+		}
+		defaultCandidate = &fallback
+	}
+
+	if c.targetHWND == 0 {
+		return *defaultCandidate
+	}
+
+	// Score candidates based on constraint points that hit the target window
+	type evalResult struct {
+		candidate MotionCandidate
+		hitCount  int
+	}
+
+	evaluations := make([]evalResult, 0, len(candidates))
+	for _, cand := range candidates {
+		pts := cand.Path.SampledConstraintPoints(10)
+		hits := 0
+		for _, pt := range pts {
+			wnd := platformWindowIDAtPoint(pt)
+			if wnd == c.targetHWND {
+				hits++
+			}
+		}
+		evaluations = append(evaluations, evalResult{candidate: cand, hitCount: hits})
+	}
+
+	bestHits := 0
+	for _, ev := range evaluations {
+		if ev.hitCount > bestHits {
+			bestHits = ev.hitCount
 		}
 	}
 
+	if bestHits > 0 {
+		var bestCand *MotionCandidate
+		for _, ev := range evaluations {
+			if ev.hitCount == bestHits {
+				if bestCand == nil || ev.candidate.Score < bestCand.Score {
+					cp := ev.candidate
+					bestCand = &cp
+				}
+			}
+		}
+		if bestCand != nil {
+			return *bestCand
+		}
+	}
+
+	return *defaultCandidate
+}
+
+func (c *VisualCursorController) animateMove(start, end Pt) {
+	candidate := c.bestMotionCandidate(start, end)
 	path := candidate.Path
 	duration := CalibratedTravelDuration()
 	springTargetDuration := ComputeCloseEnoughTime(OfficialSpringConfig())
@@ -284,6 +374,8 @@ func (c *VisualCursorController) animateMove(start, end Pt) {
 	springState := SpringState{}
 
 	for {
+		c.refreshActiveOrderingIfNeeded()
+
 		elapsed := timeNow() - startTime
 		normalizedElapsed := clampF(elapsed/math.Max(duration, 0.001), 0, 1)
 		springTime := normalizedElapsed * springTargetDuration
@@ -321,11 +413,12 @@ func (c *VisualCursorController) seedVisualDynamicsIfNeeded(tip Pt, t float64) {
 }
 
 func (c *VisualCursorController) advanceVisualDynamics(targetTip Pt, idleAngleOffset, t float64) VisualRenderState {
-	c.seedVisualDynamicsIfNeeded(targetTip, t)
+	clampedTarget := c.clampTipPosition(targetTip)
+	c.seedVisualDynamicsIfNeeded(clampedTarget, t)
 	config := DefaultVisualDynamicsConfig()
 	state, rs := AdvanceVisualDynamics(
 		*c.visualDynamicsState,
-		targetTip,
+		clampedTarget,
 		t,
 		idleAngleOffset,
 		neutralHeading,
@@ -358,8 +451,6 @@ func (c *VisualCursorController) startIdleAnimation() {
 
 	resting := *c.restingTip
 
-	// Run idle animation in a goroutine. We don't hold the lock during sleep,
-	// but we re-acquire it for each frame update.
 	go func() {
 		ticker := time.NewTicker(time.Second / 60)
 		defer ticker.Stop()
@@ -373,6 +464,7 @@ func (c *VisualCursorController) startIdleAnimation() {
 					c.mu.Unlock()
 					return
 				}
+				c.refreshActiveOrderingIfNeeded()
 				c.idlePhase += 0.05
 				angleOffset := math.Sin(c.idlePhase*0.8) * idleAmplitude
 				rs := c.advanceVisualDynamics(resting, angleOffset, timeNow())

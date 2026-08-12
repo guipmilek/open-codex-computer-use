@@ -4,9 +4,11 @@ package main
 
 import (
 	"image"
+	"math"
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -29,6 +31,11 @@ var (
 	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
 	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
 	procPostMessageW        = user32.NewProc("PostMessageW")
+	procGetWindow           = user32.NewProc("GetWindow")
+	procIsWindow            = user32.NewProc("IsWindow")
+	procWindowFromPoint     = user32.NewProc("WindowFromPoint")
+	procMonitorFromPoint    = user32.NewProc("MonitorFromPoint")
+	procGetMonitorInfoW     = user32.NewProc("GetMonitorInfoW")
 
 	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
 	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
@@ -46,10 +53,13 @@ const (
 	WS_EX_TOOLWINDOW  = 0x00000080
 	WS_POPUP          = 0x80000000
 
+	HWND_TOP       = 0
 	HWND_TOPMOST   = ^uintptr(0) // -1
 	SWP_NOSIZE     = 0x0001
 	SWP_NOMOVE     = 0x0002
 	SWP_NOACTIVATE = 0x0010
+	SWP_SHOWWINDOW = 0x0040
+	SW_SHOWNA      = 8
 	SW_SHOW        = 5
 	SW_HIDE        = 0
 
@@ -59,6 +69,10 @@ const (
 
 	WM_USER = 0x0400
 	WM_QUIT = 0x0012
+
+	GW_HWNDPREV = 3
+
+	MONITOR_DEFAULTTONEAREST = 2
 )
 
 type POINT struct {
@@ -67,6 +81,17 @@ type POINT struct {
 
 type SIZE struct {
 	CX, CY int32
+}
+
+type RECT struct {
+	Left, Top, Right, Bottom int32
+}
+
+type MONITORINFO struct {
+	CbSize    uint32
+	RcMonitor RECT
+	RcWork    RECT
+	DwFlags   uint32
 }
 
 type BLENDFUNCTION struct {
@@ -119,6 +144,11 @@ type MSG struct {
 	Pt      POINT
 }
 
+type overlayCmd struct {
+	fn   func()
+	done chan struct{}
+}
+
 type overlayWindow struct {
 	hwnd        uintptr
 	memDC       uintptr
@@ -128,8 +158,10 @@ type overlayWindow struct {
 	cursorImage *image.NRGBA
 	width       int32
 	height      int32
+	lastPos     POINT
+	lastAlpha   byte
 
-	cmdChan chan func()
+	cmdChan chan overlayCmd
 }
 
 var (
@@ -142,8 +174,9 @@ func platformCreateOverlay() *overlayWindow {
 		overlayInstance = &overlayWindow{
 			width:       126,
 			height:      126,
+			lastAlpha:   255,
 			cursorImage: loadCursorImage(),
-			cmdChan:     make(chan func(), 64),
+			cmdChan:     make(chan overlayCmd, 64),
 		}
 
 		ready := make(chan bool)
@@ -224,8 +257,13 @@ func (w *overlayWindow) runMessageLoop(ready chan bool) {
 	for {
 		for {
 			select {
-			case fn := <-w.cmdChan:
-				fn()
+			case cmd := <-w.cmdChan:
+				if cmd.fn != nil {
+					cmd.fn()
+				}
+				if cmd.done != nil {
+					close(cmd.done)
+				}
 			default:
 				goto checkMessages
 			}
@@ -245,29 +283,34 @@ func (w *overlayWindow) runMessageLoop(ready chan bool) {
 	procDestroyWindow.Call(w.hwnd)
 }
 
-func (w *overlayWindow) postCmd(fn func()) {
+// postCmdSync posts a command and synchronously blocks until the Win32 thread
+// finishes executing it and committing the frame.
+func (w *overlayWindow) postCmdSync(fn func()) {
 	if w == nil || w.hwnd == 0 {
 		return
 	}
-	w.cmdChan <- fn
+	done := make(chan struct{})
+	w.cmdChan <- overlayCmd{fn: fn, done: done}
 	procPostMessageW.Call(w.hwnd, WM_USER, 0, 0)
+	<-done
 }
 
 func (w *overlayWindow) updateFrame(screenX, screenY float64, renderState VisualRenderState, clickProgress float64) {
-	w.postCmd(func() {
+	w.postCmdSync(func() {
 		renderCursorToDIB(w.pixels, w.width, w.height, w.cursorImage, renderState, clickProgress)
 
-		tipAnchorX, tipAnchorY := 60.35, 70.3
-		left := int32(screenX - tipAnchorX)
-		top := int32(screenY - tipAnchorY)
+		tipAnchorX, tipAnchorY := cursorTipAnchorX, cursorTipAnchorY
+		left := int32(math.Round(screenX - tipAnchorX))
+		top := int32(math.Round(screenY - tipAnchorY))
+		w.lastPos = POINT{X: left, Y: top}
 
-		ptDst := POINT{X: left, Y: top}
+		ptDst := w.lastPos
 		sizeDst := SIZE{CX: w.width, CY: w.height}
 		ptSrc := POINT{X: 0, Y: 0}
 		blend := BLENDFUNCTION{
 			BlendOp:             AC_SRC_OVER,
 			BlendFlags:          0,
-			SourceConstantAlpha: 255,
+			SourceConstantAlpha: w.lastAlpha,
 			AlphaFormat:         AC_SRC_ALPHA,
 		}
 
@@ -285,11 +328,24 @@ func (w *overlayWindow) updateFrame(screenX, screenY float64, renderState Visual
 	})
 }
 
+// setZOrder places the overlay immediately above targetHWND in Win32 Z-order.
+// In Win32 SetWindowPos semantics, inserting after `hWndInsertAfter` places
+// the window BELOW `hWndInsertAfter`. Thus, to place `hwnd` immediately ABOVE
+// `targetHWND`, `hWndInsertAfter` must be the predecessor of `targetHWND`
+// (`GetWindow(targetHWND, GW_HWNDPREV)`).
 func (w *overlayWindow) setZOrder(targetHWND uintptr) {
-	w.postCmd(func() {
-		hwndInsertAfter := HWND_TOPMOST
+	w.postCmdSync(func() {
+		var hwndInsertAfter uintptr = HWND_TOP
 		if targetHWND != 0 {
-			hwndInsertAfter = targetHWND
+			res, _, _ := procIsWindow.Call(targetHWND)
+			if res != 0 {
+				prev, _, _ := procGetWindow.Call(targetHWND, GW_HWNDPREV)
+				if prev != 0 {
+					hwndInsertAfter = prev
+				} else {
+					hwndInsertAfter = HWND_TOP
+				}
+			}
 		}
 		procSetWindowPos.Call(
 			w.hwnd,
@@ -300,26 +356,105 @@ func (w *overlayWindow) setZOrder(targetHWND uintptr) {
 	})
 }
 
+// show shows the overlay using SWP_SHOWWINDOW and SWP_NOACTIVATE (never activates or steals focus).
 func (w *overlayWindow) show() {
-	w.postCmd(func() {
-		procShowWindow.Call(w.hwnd, SW_SHOW)
+	w.postCmdSync(func() {
+		procSetWindowPos.Call(
+			w.hwnd,
+			0,
+			0, 0, 0, 0,
+			SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW,
+		)
 	})
 }
 
+// hide hides the overlay immediately.
 func (w *overlayWindow) hide() {
-	w.postCmd(func() {
+	w.postCmdSync(func() {
 		procShowWindow.Call(w.hwnd, SW_HIDE)
+		w.lastAlpha = 255
 	})
 }
 
+// fadeOut animates alpha from 255 down to 0 over durationMs (120ms) with easing,
+// then hides the window.
 func (w *overlayWindow) fadeOut(durationMs int) {
-	w.postCmd(func() {
+	w.postCmdSync(func() {
+		steps := 12
+		stepDuration := time.Duration(durationMs/steps) * time.Millisecond
+
+		ptDst := w.lastPos
+		sizeDst := SIZE{CX: w.width, CY: w.height}
+		ptSrc := POINT{X: 0, Y: 0}
+
+		for i := steps; i >= 0; i-- {
+			alpha := byte((i * 255) / steps)
+			w.lastAlpha = alpha
+
+			blend := BLENDFUNCTION{
+				BlendOp:             AC_SRC_OVER,
+				BlendFlags:          0,
+				SourceConstantAlpha: alpha,
+				AlphaFormat:         AC_SRC_ALPHA,
+			}
+
+			procUpdateLayeredWindow.Call(
+				w.hwnd,
+				0,
+				uintptr(unsafe.Pointer(&ptDst)),
+				uintptr(unsafe.Pointer(&sizeDst)),
+				w.memDC,
+				uintptr(unsafe.Pointer(&ptSrc)),
+				0,
+				uintptr(unsafe.Pointer(&blend)),
+				ULW_ALPHA,
+			)
+
+			time.Sleep(stepDuration)
+		}
+
 		procShowWindow.Call(w.hwnd, SW_HIDE)
+		w.lastAlpha = 255
 	})
 }
 
 func (w *overlayWindow) destroy() {
-	w.postCmd(func() {
+	w.postCmdSync(func() {
 		procPostQuitMessage.Call(0)
 	})
+}
+
+// --- Win32 Monitor & Work Area Helpers ---
+
+func platformMonitorWorkArea(pt Pt) Rect {
+	winPt := POINT{X: int32(math.Round(pt.X)), Y: int32(math.Round(pt.Y))}
+	hMon, _, _ := procMonitorFromPoint.Call(
+		uintptr(winPt.X),
+		uintptr(winPt.Y),
+		MONITOR_DEFAULTTONEAREST,
+	)
+
+	if hMon == 0 {
+		return Rect{X: 0, Y: 0, W: 1920, H: 1080}
+	}
+
+	var mi MONITORINFO
+	mi.CbSize = uint32(unsafe.Sizeof(mi))
+	res, _, _ := procGetMonitorInfoW.Call(hMon, uintptr(unsafe.Pointer(&mi)))
+	if res == 0 {
+		return Rect{X: 0, Y: 0, W: 1920, H: 1080}
+	}
+
+	return Rect{
+		X: float64(mi.RcWork.Left),
+		Y: float64(mi.RcWork.Top),
+		W: float64(mi.RcWork.Right - mi.RcWork.Left),
+		H: float64(mi.RcWork.Bottom - mi.RcWork.Top),
+	}
+}
+
+func platformWindowIDAtPoint(pt Pt) uintptr {
+	winPt := POINT{X: int32(math.Round(pt.X)), Y: int32(math.Round(pt.Y))}
+	hwnd, _, _ := procWindowFromPoint.Call(uintptr(winPt.X), uintptr(winPt.Y))
+	return hwnd
 }
