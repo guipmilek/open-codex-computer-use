@@ -114,7 +114,8 @@
 - 这 9 个 tool 的协议面与 macOS 主线保持一致：`list_apps`、`get_app_state`、`click`、`perform_secondary_action`、`scroll`、`drag`、`type_text`、`press_key`、`set_value`。其中 element-targeted action 会优先复用上一轮 `get_app_state` 的 runtime id / automation metadata，coordinate action 使用 screenshot/window-relative 坐标。
 - Windows `click_method=accessibility` 映射到 UI Automation pattern，`app_post` 映射到 HWND `PostMessage`；macOS-only 的 `sky_click` 和没有实现的 `global` 都会在 snapshot lookup 前明确返回 unsupported。`auto` 仍保持 UIA 优先、window message fallback 的现有行为。
 - Windows UI Automation 需要运行在已登录用户的桌面 session 里。通过 SSH 作为脱离桌面的后台进程运行时，PowerShell 可以启动并返回 JSON，但系统可能不给它暴露顶层窗口；这种情况下 `list_apps` 会是空，`get_app_state` 可能返回 `appNotFound(...)`。
-- 当前 Windows 侧仍是功能性第一版：没有 visual cursor overlay、没有 installer/onboarding、没有 code signing，也没有独立的 Windows smoke fixture。后续 TODO 记录在 `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`。
+- Windows runtime 已支持原生 Go + Win32 Visual Cursor Overlay (`WS_EX_LAYERED` + `UpdateLayeredWindow`)：完美复刻 macOS 1:1 Motion Model (Heading-driven Bezier, Spring physical simulation, Visual Dynamics lag/fog) 与 tip anchor/fresh-start 姿态 (`60.35, 70.3`)；在 action 前同步 `MoveToAndWait` 到与 PowerShell 动作完全重合的屏幕坐标，并在点击后 `PulseClickAndWait` 或 `Settle`。该 Overlay 默认开启，可以通过环境变量 `OPEN_COMPUTER_USE_VISUAL_CURSOR=0` (或 `false`/`off`) 禁用，且在无 GUI 桌面/SSH 独立运行时会自动 gracefully degradation 为 no-op。
+- 当前 Windows 侧主要缺口：没有 installer/onboarding、没有 code signing，以及独立的 Windows smoke fixture。后续 TODO 记录在 `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`。
 
 ### 7. Linux Runtime
 
