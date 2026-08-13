@@ -42,6 +42,7 @@ var (
 	procGetAncestor                   = user32.NewProc("GetAncestor")
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 	procSetProcessDPIAware            = user32.NewProc("SetProcessDPIAware")
+	procGetDesktopWindow              = user32.NewProc("GetDesktopWindow")
 
 	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
 	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
@@ -189,6 +190,9 @@ type overlayWindow struct {
 	lastCommitSucceeded bool
 	frameAttemptCount   uint64
 	frameCommitCount    uint64
+	// lastFrameCommitMonoNs records the monotonic timestamp (UnixNano) of the
+	// last successful UpdateLayeredWindow commit, used for timing diagnostics.
+	lastFrameCommitMonoNs int64
 
 	cmdChan chan overlayCmd
 }
@@ -360,6 +364,7 @@ func (w *overlayWindow) updateFrame(screenX, screenY float64, renderState Visual
 			w.lastCommitSucceeded = true
 			w.lastCommitTime = w.lastAttemptTime
 			w.frameCommitCount++
+			w.lastFrameCommitMonoNs = time.Now().UnixNano()
 		} else {
 			w.lastCommitSucceeded = false
 		}
@@ -490,6 +495,7 @@ func (w *overlayWindow) fadeOut(durationMs int) {
 				w.lastCommitSucceeded = true
 				w.lastCommitTime = w.lastAttemptTime
 				w.frameCommitCount++
+				w.lastFrameCommitMonoNs = time.Now().UnixNano()
 			} else {
 				w.lastCommitSucceeded = false
 			}
@@ -551,7 +557,6 @@ func platformWindowIDAtPoint(pt Pt, excludeHWND uintptr) uintptr {
 		return 0
 	}
 
-	procGetDesktopWindow := user32.NewProc("GetDesktopWindow")
 	desktop, _, _ := procGetDesktopWindow.Call()
 	if rawHit == desktop {
 		return 0
@@ -621,7 +626,6 @@ func platformGetRootWindow(hwnd uintptr) uintptr {
 	if hwnd == 0 {
 		return 0
 	}
-	procGetDesktopWindow := user32.NewProc("GetDesktopWindow")
 	desktop, _, _ := procGetDesktopWindow.Call()
 	root, _, _ := procGetAncestor.Call(hwnd, GA_ROOT)
 	if root != 0 && root != desktop {

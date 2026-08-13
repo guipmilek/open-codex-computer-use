@@ -56,3 +56,8 @@ Study and implement the software cursor flow on Windows to match the macOS visua
    - **Three-Window Z-Order Integration**: Verified Z-order stack relations (`GetWindow(targetRoot, GW_HWNDPREV) == overlay` and `getPrevVisibleRootWindow(overlay) == unrelatedRoot`) across 3+ `setZOrder` calls and small movements ($\le 2\text{px}$).
    - **PowerShell DPI Diagnostics Output Suppression**: Added `$null =` output assignments for `Add-Type` and P/Invoke calls in `runtime.ps1` to prevent stdout JSON pollution; added real script diagnostic execution test `TestPowerShellDPIDiagnosticsUsingEmbeddedScript`.
    - **Multi-Toolchain & Cross-Arch Verification**: Re-verified clean compilation, test, and vet runs across Go 1.22 (`go1.22.12`), Go 1.26 (`go1.26.5`), and Windows ARM64 (`GOOS=windows GOARCH=arm64`).
+
+8. **Phase 2 Audit & E2E Validation**:
+   - **Screenshot Targeting**: `Capture-WindowPngBase64` rewritten in `runtime.ps1` to use native `PrintWindow(PW_RENDERFULLCONTENT)` instead of `CopyFromScreen` to strictly capture target window pixels (bypassing z-order occlusions).
+   - **Performance Improvements**: Removed unused `fmt` import and moved `GetDesktopWindow` to global static variable in `cursor_overlay_windows.go`.
+   - **E2E & Stress Validation Harness**: Added `cursor_audit_test.go` encompassing 15-phase audit for: sub-pixel precision rendering (<0.6px error margin over 50 positions), temporal strict ordering (Commit < Action < Pulse), physical cursor zero-drift validation, foreground/active-window anti-theft validation, and 200-cycle DIB memory stress test (no leaks/goroutine orphans).

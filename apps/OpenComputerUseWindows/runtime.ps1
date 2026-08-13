@@ -61,6 +61,9 @@ public static class OCUWin32 {
 
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
+
+    [DllImport("user32.dll")]
+    public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
 }
 "@
 
@@ -584,14 +587,35 @@ function Render-Tree($element, $windowBounds, $TextLimit = $script:DefaultTextLi
     }
 }
 
-function Capture-WindowPngBase64($bounds) {
+function Capture-WindowPngBase64($hwnd, $bounds) {
     if ($null -eq $bounds -or $bounds.width -le 0 -or $bounds.height -le 0) {
         return $null
     }
+    $w = [int][math]::Round($bounds.width)
+    $h = [int][math]::Round($bounds.height)
     try {
-        $bitmap = New-Object System.Drawing.Bitmap ([int][math]::Round($bounds.width)), ([int][math]::Round($bounds.height))
-        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-        $graphics.CopyFromScreen([int][math]::Round($bounds.x), [int][math]::Round($bounds.y), 0, 0, $bitmap.Size)
+        # Prefer PrintWindow for window-specific capture (works even when covered)
+        $usedPrintWindow = $false
+        if ($null -ne $hwnd -and $hwnd -ne [IntPtr]::Zero) {
+            $bitmap = New-Object System.Drawing.Bitmap $w, $h
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $hdc = $graphics.GetHdc()
+            $PW_RENDERFULLCONTENT = 0x00000002
+            $ok = [OCUWin32]::PrintWindow($hwnd, $hdc, $PW_RENDERFULLCONTENT)
+            $graphics.ReleaseHdc($hdc)
+            if ($ok) {
+                $usedPrintWindow = $true
+            } else {
+                $graphics.Dispose()
+                $bitmap.Dispose()
+            }
+        }
+        # Fallback: CopyFromScreen (captures screen area, may include other windows)
+        if (-not $usedPrintWindow) {
+            $bitmap = New-Object System.Drawing.Bitmap $w, $h
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen([int][math]::Round($bounds.x), [int][math]::Round($bounds.y), 0, 0, $bitmap.Size)
+        }
         $stream = New-Object System.IO.MemoryStream
         $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
         $graphics.Dispose()
@@ -650,7 +674,7 @@ function Build-Snapshot([string]$query, $TextLimit = $script:DefaultTextLimit, [
         }
         windowTitle = Limit-Text $process.MainWindowTitle $TextLimit
         windowBounds = $bounds
-        screenshotPngBase64 = Capture-WindowPngBase64 $bounds
+        screenshotPngBase64 = Capture-WindowPngBase64 ([IntPtr]$process.MainWindowHandle) $bounds
         treeLines = @($rendered.lines)
         focusedSummary = Get-FocusedSummary $process.Id $TextLimit
         selectedText = Get-SelectedText $process.Id $TextLimit

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"math"
 )
 
@@ -662,6 +661,3 @@ func AdvanceVisualDynamics(
 		FogScale:        fogSc,
 	}
 }
-
-// Unused suppressor for fmt import (used for debugging, can be removed)
-var _ = fmt.Sprintf
