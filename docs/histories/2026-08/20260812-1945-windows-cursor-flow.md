@@ -49,8 +49,10 @@ Study and implement the software cursor flow on Windows to match the macOS visua
 - `apps/OpenComputerUseWindows/cursor_target_test.go`
 - `apps/OpenComputerUseWindows/cursor_overlay_test.go`
 - `apps/OpenComputerUseWindows/cursor_renderer_test.go`
-- `apps/OpenComputerUseWindows/cursor_overlay_windows_test.go`
-- `apps/OpenComputerUseWindows/main.go`
-- `apps/OpenComputerUseWindows/official-software-cursor-window-252.png`
-- `docs/ARCHITECTURE.md`
-- `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`
+
+7. **Final Audit Blockers Resolved**:
+   - **`platformWindowIDAtPoint` Point-Aware Z-Order Walk**: Implemented geometric point containment filtering via `GetWindowRect` during `GW_HWNDNEXT` iteration to skip out-of-bounds overlay/unrelated windows.
+   - **Candidate Scoring Over Overlay**: Fixed candidate trajectory scoring when target window is below overlay by using point-aware `platformWindowIDAtPoint`, validated with `TestCandidateScoringWithVisibleOverlayOverTarget`.
+   - **Three-Window Z-Order Integration**: Verified Z-order stack relations (`GetWindow(targetRoot, GW_HWNDPREV) == overlay` and `getPrevVisibleRootWindow(overlay) == unrelatedRoot`) across 3+ `setZOrder` calls and small movements ($\le 2\text{px}$).
+   - **PowerShell DPI Diagnostics Output Suppression**: Added `$null =` output assignments for `Add-Type` and P/Invoke calls in `runtime.ps1` to prevent stdout JSON pollution; added real script diagnostic execution test `TestPowerShellDPIDiagnosticsUsingEmbeddedScript`.
+   - **Multi-Toolchain & Cross-Arch Verification**: Re-verified clean compilation, test, and vet runs across Go 1.22 (`go1.22.12`), Go 1.26 (`go1.26.5`), and Windows ARM64 (`GOOS=windows GOARCH=arm64`).
