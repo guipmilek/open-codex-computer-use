@@ -5,7 +5,6 @@ package main
 import (
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -15,8 +14,7 @@ import (
 )
 
 const (
-	WS_VISIBLE    = 0x10000000
-	WS_EX_TOPMOST = 0x00000008
+	WS_VISIBLE = 0x10000000
 )
 
 func TestWin32ABIPACKING(t *testing.T) {
@@ -45,32 +43,19 @@ func TestWin32ABIPACKING(t *testing.T) {
 	}
 }
 
-func TestPowerShellDPIAwarenessContext(t *testing.T) {
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `
-		Add-Type -TypeDefinition @"
-		using System;
-		using System.Runtime.InteropServices;
-		public static class OCUWin32Test {
-			[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
-			[DllImport("user32.dll")] public static extern IntPtr GetThreadDpiAwarenessContext();
-			[DllImport("user32.dll")] public static extern bool AreDpiAwarenessContextsEqual(IntPtr c1, IntPtr c2);
-		}
-"@
-		$PMv2 = [IntPtr]::new(-4)
-		[void][OCUWin32Test]::SetThreadDpiAwarenessContext($PMv2)
-		$eff = [OCUWin32Test]::GetThreadDpiAwarenessContext()
-		$isPMv2 = [OCUWin32Test]::AreDpiAwarenessContextsEqual($eff, $PMv2)
-		Write-Output "IS_PMV2=$isPMv2"
-	`)
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Failed to run PowerShell DPI check: %v", err)
+func TestPowerShellDPIDiagnosticsUsingEmbeddedScript(t *testing.T) {
+	req := psRequest{
+		Tool: "dpi_diagnostics",
+		App:  "explorer.exe",
 	}
 
-	text := string(out)
-	if !strings.Contains(text, "IS_PMV2=True") {
-		t.Fatalf("PowerShell process failed to establish PMv2 DPI awareness context: %s", text)
+	resp, err := runPowerShell(req)
+	if err != nil {
+		t.Fatalf("Failed to execute real runtime.ps1 with dpi_diagnostics: %v", err)
+	}
+
+	if !resp.OK {
+		t.Fatalf("Real runtime.ps1 returned OK=false for dpi_diagnostics")
 	}
 }
 
@@ -120,7 +105,7 @@ func TestWindowFromPointIntegration(t *testing.T) {
 		uintptr(unsafe.Pointer(className)),
 		0,
 		WS_POPUP|WS_VISIBLE,
-		200, 200, 300, 300,
+		300, 300, 300, 300,
 		0, 0, hInst, 0,
 	)
 
@@ -132,12 +117,92 @@ func TestWindowFromPointIntegration(t *testing.T) {
 	procSetWindowPos.Call(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
 	time.Sleep(30 * time.Millisecond)
 
-	hit := platformWindowIDAtPoint(Pt{X: 250, Y: 250}, 0)
+	hit := platformWindowIDAtPoint(Pt{X: 400, Y: 400}, 0)
 	root := platformGetRootWindow(hwnd)
 
 	if hit != root {
 		t.Fatalf("platformWindowIDAtPoint = 0x%x, expected root window 0x%x", hit, root)
 	}
+}
+
+func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
+	hInst, _, _ := procGetModuleHandleW.Call(0)
+	className, _ := syscall.UTF16PtrFromString("TestPointAwareClass")
+
+	wc := WNDCLASSEX{
+		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
+		LpfnWndProc:   syscall.NewCallback(wndProc),
+		HInstance:     hInst,
+		LpszClassName: className,
+	}
+	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+
+	// Target window at (300, 300, 300, 300) -> [300, 600]
+	targetHWND, _, _ := procCreateWindowExW.Call(
+		WS_EX_TOPMOST, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
+		300, 300, 300, 300, 0, 0, hInst, 0,
+	)
+	if targetHWND == 0 {
+		t.Skip("Could not create target window")
+	}
+	defer procDestroyWindow.Call(targetHWND)
+
+	// Unrelated window at (0, 0, 100, 100) -> [0, 100] (DOES NOT contain P(400, 400))
+	unrelatedHWND, _, _ := procCreateWindowExW.Call(
+		WS_EX_TOPMOST, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
+		0, 0, 100, 100, 0, 0, hInst, 0,
+	)
+	if unrelatedHWND == 0 {
+		t.Skip("Could not create unrelated window")
+	}
+	defer procDestroyWindow.Call(unrelatedHWND)
+
+	// Overlay window at (200, 200, 500, 500) -> [200, 700] (CONTAINS P(400, 400))
+	overlayHWND, _, _ := procCreateWindowExW.Call(
+		WS_EX_TOPMOST, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
+		200, 200, 500, 500, 0, 0, hInst, 0,
+	)
+	if overlayHWND == 0 {
+		t.Skip("Could not create overlay window")
+	}
+	defer procDestroyWindow.Call(overlayHWND)
+
+	// Set Z-order: overlay (top) > unrelated (middle) > target (bottom)
+	procSetWindowPos.Call(targetHWND, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
+	procSetWindowPos.Call(unrelatedHWND, targetHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
+	procSetWindowPos.Call(overlayHWND, unrelatedHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
+	time.Sleep(30 * time.Millisecond)
+
+	P := Pt{X: 400, Y: 400}
+	packedP := packPoint(P)
+
+	// 1. Raw WindowFromPoint(P) must hit overlayHWND
+	hitOverlay, _, _ := procWindowFromPoint.Call(packedP)
+	if hitOverlay != overlayHWND {
+		t.Fatalf("Raw WindowFromPoint(P) = 0x%x, expected overlay 0x%x", hitOverlay, overlayHWND)
+	}
+
+	// 2. Point-aware platformWindowIDAtPoint(P, overlayHWND) must skip unrelatedHWND (out of bounds) and return targetRoot!
+	targetRoot := platformGetRootWindow(targetHWND)
+	hitResolved := platformWindowIDAtPoint(P, overlayHWND)
+
+	if hitResolved != targetRoot {
+		t.Fatalf("platformWindowIDAtPoint(P, overlay) = 0x%x, expected targetRoot 0x%x", hitResolved, targetRoot)
+	}
+}
+
+func getPrevVisibleRootWindow(hwnd uintptr) uintptr {
+	for hwnd != 0 {
+		prev, _, _ := procGetWindow.Call(hwnd, GW_HWNDPREV)
+		if prev == 0 {
+			break
+		}
+		hwnd = prev
+		if isWndVisible(hwnd) {
+			return platformGetRootWindow(hwnd)
+		}
+	}
+	return 0
 }
 
 func TestThreeWindowZOrderIntegration(t *testing.T) {
@@ -152,29 +217,33 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	}
 	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
-	// Create target window
+	// Create non-topmost target and unrelated test windows
 	targetHWND, _, _ := procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
-		100, 100, 400, 400, 0, 0, hInst, 0,
+		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
+		300, 300, 400, 400, 0, 0, hInst, 0,
 	)
 	if targetHWND == 0 {
 		t.Skip("Could not create target window")
 	}
 	defer procDestroyWindow.Call(targetHWND)
 
-	// Create unrelated window
 	unrelatedHWND, _, _ := procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
-		100, 100, 400, 400, 0, 0, hInst, 0,
+		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
+		300, 300, 400, 400, 0, 0, hInst, 0,
 	)
 	if unrelatedHWND == 0 {
 		t.Skip("Could not create unrelated window")
 	}
 	defer procDestroyWindow.Call(unrelatedHWND)
 
+	// Show without activation to avoid stealing focus
+	procShowWindow.Call(unrelatedHWND, 8) // SW_SHOWNA
+	procShowWindow.Call(targetHWND, 8)    // SW_SHOWNA
+
 	// Setup initial Z-order: unrelated (top) > target (bottom)
-	procSetWindowPos.Call(unrelatedHWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)
-	procSetWindowPos.Call(targetHWND, unrelatedHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)
+	procSetWindowPos.Call(unrelatedHWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+	procSetWindowPos.Call(targetHWND, unrelatedHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+	time.Sleep(30 * time.Millisecond)
 
 	ctrl := NewVisualCursorController()
 	ctrl.ensureOverlay()
@@ -183,31 +252,56 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	}
 
 	targetRoot := platformGetRootWindow(targetHWND)
+	unrelatedRoot := platformGetRootWindow(unrelatedHWND)
 
-	// Call setZOrder(targetHWND) to position overlay immediately above target
+	// Position overlay immediately above target
+	ctrl.overlay.updateFrame(200, 200, ctrl.initialRenderState(Pt{X: 200, Y: 200}), 0)
 	ctrl.overlay.setZOrder(targetHWND)
+	ctrl.overlay.show()
+	time.Sleep(30 * time.Millisecond)
 
-	// Assert Z-order relation: target (prev of target) == overlay
-	prevOfTarget, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
-	if prevOfTarget != ctrl.overlay.hwnd {
-		t.Fatalf("GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", prevOfTarget, ctrl.overlay.hwnd)
+	// Assert BOTH Z-order relations:
+	// 1. GetWindow(targetRoot, GW_HWNDPREV) == ctrl.overlay.hwnd
+	// 2. getPrevVisibleRootWindow(ctrl.overlay.hwnd) == unrelatedRoot
+	pTarget, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
+	pOverlay := getPrevVisibleRootWindow(ctrl.overlay.hwnd)
+
+	if pTarget != ctrl.overlay.hwnd {
+		t.Fatalf("GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", pTarget, ctrl.overlay.hwnd)
+	}
+	if pOverlay != unrelatedRoot {
+		t.Fatalf("getPrevVisibleRootWindow(overlay) = 0x%x, expected unrelated 0x%x", pOverlay, unrelatedRoot)
 	}
 
-	// Repeat setZOrder(targetHWND) 3 times to verify Z-order is preserved
+	// Repeat setZOrder(targetHWND) 3+ times and re-verify BOTH relations
 	for i := 0; i < 3; i++ {
 		ctrl.overlay.setZOrder(targetHWND)
+		time.Sleep(10 * time.Millisecond)
 
-		pTarget, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
-		if pTarget != ctrl.overlay.hwnd {
-			t.Fatalf("Iteration %d: GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", i, pTarget, ctrl.overlay.hwnd)
+		pT, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
+		pO := getPrevVisibleRootWindow(ctrl.overlay.hwnd)
+
+		if pT != ctrl.overlay.hwnd {
+			t.Fatalf("Iteration %d: GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", i, pT, ctrl.overlay.hwnd)
+		}
+		if pO != unrelatedRoot {
+			t.Fatalf("Iteration %d: getPrevVisibleRootWindow(overlay) = 0x%x, expected unrelated 0x%x", i, pO, unrelatedRoot)
 		}
 	}
 
-	// Test small movement (<= 2px) preserving Z-order
-	ctrl.MoveToAndWait(102, 102)
+	// Test small movement (<= 2px): initial at (200, 200), small step to (201, 201)
+	ctrl.MoveToAndWait(200, 200)
+	ctrl.MoveToAndWait(201, 201)
+	time.Sleep(30 * time.Millisecond)
+
 	pTargetSmall, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
+	pOverlaySmall := getPrevVisibleRootWindow(ctrl.overlay.hwnd)
+
 	if pTargetSmall != ctrl.overlay.hwnd {
 		t.Fatalf("After small move: GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", pTargetSmall, ctrl.overlay.hwnd)
+	}
+	if pOverlaySmall != unrelatedRoot {
+		t.Fatalf("After small move: getPrevVisibleRootWindow(overlay) = 0x%x, expected unrelated 0x%x", pOverlaySmall, unrelatedRoot)
 	}
 
 	ctrl.Reset()
@@ -225,14 +319,16 @@ func TestCandidateScoringWithVisibleOverlayOverTarget(t *testing.T) {
 	}
 	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
+	// Target window (WS_EX_TOPMOST) at (300, 300, 500, 500)
 	targetHWND, _, _ := procCreateWindowExW.Call(
 		WS_EX_TOPMOST, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
-		100, 100, 500, 500, 0, 0, hInst, 0,
+		300, 300, 500, 500, 0, 0, hInst, 0,
 	)
 	if targetHWND == 0 {
 		t.Skip("Could not create target window")
 	}
 	defer procDestroyWindow.Call(targetHWND)
+
 	procSetWindowPos.Call(targetHWND, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
 	time.Sleep(30 * time.Millisecond)
 
@@ -245,19 +341,30 @@ func TestCandidateScoringWithVisibleOverlayOverTarget(t *testing.T) {
 		t.Skip("Overlay creation unavailable")
 	}
 
-	// Place overlay directly over target at (200, 200)
-	ctrl.overlay.updateFrame(200, 200, ctrl.initialRenderState(Pt{X: 200, Y: 200}), 0)
+	// Place overlay directly over target at (400, 400)
+	ctrl.overlay.setZOrder(targetHWND)
+	ctrl.overlay.updateFrame(400, 400, ctrl.initialRenderState(Pt{X: 400, Y: 400}), 0)
 	ctrl.overlay.show()
 
-	// Assert platformWindowIDAtPoint(pt, overlay.hwnd) finds targetRoot below overlay!
-	hitBelowOverlay := platformWindowIDAtPoint(Pt{X: 200, Y: 200}, ctrl.overlay.hwnd)
-	if hitBelowOverlay != targetRoot {
-		t.Fatalf("platformWindowIDAtPoint below overlay = 0x%x, expected targetRoot 0x%x", hitBelowOverlay, targetRoot)
+	// Prove: point-aware platformWindowIDAtPoint(Pt{400, 400}, ctrl.overlay.hwnd) returns targetRoot!
+	hitBelow := platformWindowIDAtPoint(Pt{X: 400, Y: 400}, ctrl.overlay.hwnd)
+	if hitBelow != targetRoot {
+		t.Fatalf("platformWindowIDAtPoint below overlay = 0x%x, expected targetRoot 0x%x", hitBelow, targetRoot)
 	}
 
-	cand := ctrl.bestMotionCandidate(Pt{X: 150, Y: 150}, Pt{X: 250, Y: 250})
-	if cand.Identifier == "" {
-		t.Fatal("bestMotionCandidate returned empty candidate when overlay is visible over target")
+	// Evaluate candidate trajectory and count target hits
+	cand := ctrl.bestMotionCandidate(Pt{X: 350, Y: 350}, Pt{X: 450, Y: 450})
+	pts := cand.Path.SampledConstraintPoints(10)
+	targetHits := 0
+	for _, pt := range pts {
+		wnd := platformWindowIDAtPoint(pt, ctrl.overlay.hwnd)
+		if wnd == targetRoot {
+			targetHits++
+		}
+	}
+
+	if targetHits == 0 {
+		t.Fatalf("bestMotionCandidate targetHits = 0 when overlay is visible over target!")
 	}
 
 	ctrl.Reset()

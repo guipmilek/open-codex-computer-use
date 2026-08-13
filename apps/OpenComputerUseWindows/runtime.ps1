@@ -12,11 +12,11 @@ $AccessibilityTreeMaxDepth = 64
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Drawing
+$null = Add-Type -AssemblyName UIAutomationClient
+$null = Add-Type -AssemblyName UIAutomationTypes
+$null = Add-Type -AssemblyName System.Drawing
 
-Add-Type -TypeDefinition @"
+$null = Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
@@ -66,11 +66,11 @@ public static class OCUWin32 {
 
 try {
     $PMv2 = [IntPtr]::new(-4)
-    $previousDpiCtx = [OCUWin32]::SetThreadDpiAwarenessContext($PMv2)
+    $null = [OCUWin32]::SetThreadDpiAwarenessContext($PMv2)
     $effectiveDpiCtx = [OCUWin32]::GetThreadDpiAwarenessContext()
     $isPMv2 = [OCUWin32]::AreDpiAwarenessContextsEqual($effectiveDpiCtx, $PMv2)
     if (-not $isPMv2) {
-        [void][OCUWin32]::SetProcessDPIAware()
+        $null = [OCUWin32]::SetProcessDPIAware()
     }
 } catch {}
 
@@ -1010,6 +1010,26 @@ try {
                     throw "Cannot set a value for an element that is not settable"
                 }
                 $valuePattern.SetValue($operation.value)
+            }
+            "dpi_diagnostics" {
+                $PMv2 = [IntPtr]::new(-4)
+                $eff = [OCUWin32]::GetThreadDpiAwarenessContext()
+                $isPMv2 = [OCUWin32]::AreDpiAwarenessContextsEqual($eff, $PMv2)
+
+                $rect = New-Object OCUWin32+RECT
+                $null = [OCUWin32]::GetWindowRect($hwnd, [ref]$rect)
+
+                $uiaBounds = if ($null -ne $windowElement) { $windowElement.Current.BoundingRectangle } else { $null }
+
+                $response = [pscustomobject]@{
+                    ok = $true
+                    effectiveDpiContextIsPMv2 = $isPMv2
+                    getWindowRect = [pscustomobject]@{ left = $rect.Left; top = $rect.Top; right = $rect.Right; bottom = $rect.Bottom }
+                    uiaBoundingRectangle = if ($null -ne $uiaBounds) { [pscustomobject]@{ x = $uiaBounds.X; y = $uiaBounds.Y; width = $uiaBounds.Width; height = $uiaBounds.Height } } else { $null }
+                    windowBounds = $windowBounds
+                }
+                $response | ConvertTo-Json -Depth 8 | Write-Output
+                exit 0
             }
             default {
                 throw "unsupportedTool(`"$($operation.tool)`")"

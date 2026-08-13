@@ -33,6 +33,9 @@ var (
 	procPostMessageW                  = user32.NewProc("PostMessageW")
 	procGetWindow                     = user32.NewProc("GetWindow")
 	procIsWindow                      = user32.NewProc("IsWindow")
+	procIsWindowVisible               = user32.NewProc("IsWindowVisible")
+	procIsWindowEnabled               = user32.NewProc("IsWindowEnabled")
+	procGetWindowRect                 = user32.NewProc("GetWindowRect")
 	procWindowFromPoint               = user32.NewProc("WindowFromPoint")
 	procMonitorFromPoint              = user32.NewProc("MonitorFromPoint")
 	procGetMonitorInfoW               = user32.NewProc("GetMonitorInfoW")
@@ -54,6 +57,7 @@ const (
 	WS_EX_TRANSPARENT = 0x00000020
 	WS_EX_NOACTIVATE  = 0x08000000
 	WS_EX_TOOLWINDOW  = 0x00000080
+	WS_EX_TOPMOST     = 0x00000008
 	WS_POPUP          = 0x80000000
 
 	HWND_TOP       = 0
@@ -382,9 +386,19 @@ func (w *overlayWindow) setZOrder(targetHWND uintptr) {
 			return
 		}
 
+		procGetWindowLongW := user32.NewProc("GetWindowLongW")
+		targetExStyle, _, _ := procGetWindowLongW.Call(targetRoot, ^uintptr(19)) // GWL_EXSTYLE = -20
+		isTargetTopmost := targetExStyle&WS_EX_TOPMOST != 0
+
 		var hwndInsertAfter uintptr = HWND_TOP
 		if prev != 0 {
 			hwndInsertAfter = prev
+		} else if isTargetTopmost {
+			hwndInsertAfter = HWND_TOPMOST
+		}
+
+		if isTargetTopmost {
+			procSetWindowPos.Call(w.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
 		}
 
 		procSetWindowPos.Call(
@@ -515,6 +529,8 @@ func platformMonitorWorkArea(pt Pt) Rect {
 	}
 }
 
+// platformWindowIDAtPoint performs a point-aware Z-order walk below excludeHWND,
+// skipping invisible or disabled windows and windows whose GetWindowRect does not contain pt.
 func platformWindowIDAtPoint(pt Pt, excludeHWND uintptr) uintptr {
 	packed := packPoint(pt)
 	hwnd, _, _ := procWindowFromPoint.Call(packed)
@@ -522,23 +538,47 @@ func platformWindowIDAtPoint(pt Pt, excludeHWND uintptr) uintptr {
 		return 0
 	}
 	excludeRoot := platformGetRootWindow(excludeHWND)
+	ix := int32(math.Round(pt.X))
+	iy := int32(math.Round(pt.Y))
+
 	for hwnd != 0 {
 		root := platformGetRootWindow(hwnd)
 		if excludeHWND != 0 && (hwnd == excludeHWND || root == excludeRoot) {
 			hwnd, _, _ = procGetWindow.Call(hwnd, GW_HWNDNEXT)
 			continue
 		}
-		return root
+
+		if isWndVisible(hwnd) && isWndEnabled(hwnd) {
+			var rect RECT
+			res, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rect)))
+			if res != 0 && ix >= rect.Left && ix < rect.Right && iy >= rect.Top && iy < rect.Bottom {
+				return root
+			}
+		}
+
+		hwnd, _, _ = procGetWindow.Call(hwnd, GW_HWNDNEXT)
 	}
 	return 0
+}
+
+func isWndVisible(hwnd uintptr) bool {
+	res, _, _ := procIsWindowVisible.Call(hwnd)
+	return res != 0
+}
+
+func isWndEnabled(hwnd uintptr) bool {
+	res, _, _ := procIsWindowEnabled.Call(hwnd)
+	return res != 0
 }
 
 func platformGetRootWindow(hwnd uintptr) uintptr {
 	if hwnd == 0 {
 		return 0
 	}
+	procGetDesktopWindow := user32.NewProc("GetDesktopWindow")
+	desktop, _, _ := procGetDesktopWindow.Call()
 	root, _, _ := procGetAncestor.Call(hwnd, GA_ROOT)
-	if root != 0 {
+	if root != 0 && root != desktop {
 		return root
 	}
 	return hwnd
