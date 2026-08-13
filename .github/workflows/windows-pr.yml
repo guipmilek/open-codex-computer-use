@@ -61,11 +61,11 @@ jobs:
         test:
           - TestMonitorFromPointIntegration
           - TestWindowFromPointIntegration
-          - TestPlatformWindowIDAtPointOverlappingGeometry
-          - TestThreeWindowZOrderIntegration
-          - TestCandidateScoringWithVisibleOverlayOverNormalTarget
-          - TestCandidateScoringWithVisibleOverlayOverTopmostTarget
-          - TestOverlayTransitionTopmostToNormalTarget
+          - TestLockedPlatformWindowIDAtPointOverlappingGeometry
+          - TestLockedThreeWindowZOrderIntegration
+          - TestLockedCandidateScoringWithVisibleOverlayOverNormalTarget
+          - TestLockedCandidateScoringWithVisibleOverlayOverTopmostTarget
+          - TestLockedOverlayTransitionTopmostToNormalTarget
           - TestInstrumentedSynchronousCommitGate
           - TestForegroundWindowStability
 
