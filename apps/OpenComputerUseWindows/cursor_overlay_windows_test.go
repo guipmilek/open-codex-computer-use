@@ -121,6 +121,10 @@ func TestMonitorFromPointIntegration(t *testing.T) {
 }
 
 func TestWindowFromPointIntegration(t *testing.T) {
+	runWin32Scenario(t, windowFromPointIntegrationScenario)
+}
+
+func windowFromPointIntegrationScenario(t *testing.T) {
 	hInst, _, _ := procGetModuleHandleW.Call(0)
 	className, _ := syscall.UTF16PtrFromString("TestWinFromPtClass")
 
@@ -144,10 +148,10 @@ func TestWindowFromPointIntegration(t *testing.T) {
 	if hwnd == 0 {
 		t.Skip("Could not create test window")
 	}
-	defer procDestroyWindow.Call(hwnd)
+	defer destroyTestWindow(hwnd)
 
 	procSetWindowPos.Call(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
-	time.Sleep(30 * time.Millisecond)
+	settleWin32(30 * time.Millisecond)
 
 	hit := platformWindowIDAtPoint(Pt{X: 400, Y: 400}, 0)
 	root := platformGetRootWindow(hwnd)
@@ -158,6 +162,10 @@ func TestWindowFromPointIntegration(t *testing.T) {
 }
 
 func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
+	runWin32Scenario(t, platformWindowIDAtPointOverlappingGeometryScenario)
+}
+
+func platformWindowIDAtPointOverlappingGeometryScenario(t *testing.T) {
 	hInst, _, _ := procGetModuleHandleW.Call(0)
 	className, _ := syscall.UTF16PtrFromString("TestPointAwareClass")
 
@@ -203,7 +211,7 @@ func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
 	procSetWindowPos.Call(targetHWND, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
 	procSetWindowPos.Call(unrelatedHWND, targetHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
 	procSetWindowPos.Call(overlayHWND, unrelatedHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
-	time.Sleep(30 * time.Millisecond)
+	settleWin32(30 * time.Millisecond)
 
 	P := Pt{X: 400, Y: 400}
 	packedP := packPoint(P)
@@ -225,6 +233,8 @@ func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
 	}
 }
 
+// destroyTestWindow hides and destroys a scenario-owned window. It must run on
+// the OS thread that created the HWND, which runWin32Scenario guarantees.
 func destroyTestWindow(hwnd uintptr) {
 	if hwnd != 0 {
 		procShowWindow.Call(hwnd, 0) // SW_HIDE
@@ -232,21 +242,32 @@ func destroyTestWindow(hwnd uintptr) {
 	}
 }
 
-func getPrevVisibleRootWindow(hwnd uintptr) uintptr {
-	for hwnd != 0 {
+// zOrderIsAbove reports whether higherHWND sits somewhere above lowerHWND
+// in the Z-order stack, walking upward via GW_HWNDPREV. Strict adjacency is
+// NOT required: other windows may legitimately appear between the two. This
+// lets tests assert the relative contract (e.g. "unrelated window is above
+// the overlay") without depending on full desktop topology.
+func zOrderIsAbove(higherHWND, lowerHWND uintptr) bool {
+	const maxSteps = 4096
+	hwnd := lowerHWND
+	for i := 0; i < maxSteps && hwnd != 0; i++ {
 		prev, _, _ := procGetWindow.Call(hwnd, GW_HWNDPREV)
 		if prev == 0 {
-			break
+			return false
+		}
+		if prev == higherHWND {
+			return true
 		}
 		hwnd = prev
-		if isWndVisible(hwnd) {
-			return platformGetRootWindow(hwnd)
-		}
 	}
-	return 0
+	return false
 }
 
 func TestThreeWindowZOrderIntegration(t *testing.T) {
+	runWin32Scenario(t, threeWindowZOrderIntegrationScenario)
+}
+
+func threeWindowZOrderIntegrationScenario(t *testing.T) {
 	hInst, _, _ := procGetModuleHandleW.Call(0)
 	className, _ := syscall.UTF16PtrFromString("TestZOrderClass")
 
@@ -284,7 +305,7 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	// Setup initial Z-order: unrelated (top) > target (bottom)
 	procSetWindowPos.Call(unrelatedHWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
 	procSetWindowPos.Call(targetHWND, unrelatedHWND, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
-	time.Sleep(30 * time.Millisecond)
+	settleWin32(30 * time.Millisecond)
 
 	ctrl := NewVisualCursorController()
 	ctrl.SetTargetHWND(targetHWND)
@@ -292,61 +313,61 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	if ctrl.overlay == nil || ctrl.overlay.hwnd == 0 {
 		t.Skip("Overlay creation unavailable")
 	}
+	defer ctrl.Reset()
 
 	targetRoot := platformGetRootWindow(targetHWND)
 	unrelatedRoot := platformGetRootWindow(unrelatedHWND)
 
 	// MoveToAndWait exercises ensureOverlay, refreshActiveOrderingIfNeeded, and initial placement
 	ctrl.MoveToAndWait(200, 200)
-	time.Sleep(30 * time.Millisecond)
+	settleWin32(30 * time.Millisecond)
 
 	// Assert BOTH Z-order relations:
-	// 1. GetWindow(targetRoot, GW_HWNDPREV) == ctrl.overlay.hwnd
-	// 2. getPrevVisibleRootWindow(ctrl.overlay.hwnd) == unrelatedRoot
+	// 1. GetWindow(targetRoot, GW_HWNDPREV) == ctrl.overlay.hwnd (overlay directly above target)
+	// 2. unrelatedRoot sits above ctrl.overlay.hwnd (relative contract, not strict adjacency)
 	pTarget, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
-	pOverlay := getPrevVisibleRootWindow(ctrl.overlay.hwnd)
 
 	if pTarget != ctrl.overlay.hwnd {
 		t.Fatalf("GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", pTarget, ctrl.overlay.hwnd)
 	}
-	if pOverlay != unrelatedRoot {
-		t.Fatalf("getPrevVisibleRootWindow(overlay) = 0x%x, expected unrelated 0x%x", pOverlay, unrelatedRoot)
+	if !zOrderIsAbove(unrelatedRoot, ctrl.overlay.hwnd) {
+		t.Fatalf("unrelated root 0x%x is not above overlay 0x%x in the Z-order", unrelatedRoot, ctrl.overlay.hwnd)
 	}
 
 	// Repeat setZOrder(targetHWND) 3+ times via SetTargetHWND and re-verify BOTH relations
 	for i := 0; i < 3; i++ {
 		ctrl.SetTargetHWND(targetHWND)
-		time.Sleep(10 * time.Millisecond)
+		settleWin32(10 * time.Millisecond)
 
 		pT, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
-		pO := getPrevVisibleRootWindow(ctrl.overlay.hwnd)
 
 		if pT != ctrl.overlay.hwnd {
 			t.Fatalf("Iteration %d: GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", i, pT, ctrl.overlay.hwnd)
 		}
-		if pO != unrelatedRoot {
-			t.Fatalf("Iteration %d: getPrevVisibleRootWindow(overlay) = 0x%x, expected unrelated 0x%x", i, pO, unrelatedRoot)
+		if !zOrderIsAbove(unrelatedRoot, ctrl.overlay.hwnd) {
+			t.Fatalf("Iteration %d: unrelated root 0x%x is not above overlay 0x%x in the Z-order", i, unrelatedRoot, ctrl.overlay.hwnd)
 		}
 	}
 
 	// Test small movement (<= 2px): initial at (200, 200), small step to (201, 201)
 	ctrl.MoveToAndWait(201, 201)
-	time.Sleep(30 * time.Millisecond)
+	settleWin32(30 * time.Millisecond)
 
 	pTargetSmall, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
-	pOverlaySmall := getPrevVisibleRootWindow(ctrl.overlay.hwnd)
 
 	if pTargetSmall != ctrl.overlay.hwnd {
 		t.Fatalf("After small move: GetWindow(target, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", pTargetSmall, ctrl.overlay.hwnd)
 	}
-	if pOverlaySmall != unrelatedRoot {
-		t.Fatalf("After small move: getPrevVisibleRootWindow(overlay) = 0x%x, expected unrelated 0x%x", pOverlaySmall, unrelatedRoot)
+	if !zOrderIsAbove(unrelatedRoot, ctrl.overlay.hwnd) {
+		t.Fatalf("After small move: unrelated root 0x%x is not above overlay 0x%x in the Z-order", unrelatedRoot, ctrl.overlay.hwnd)
 	}
-
-	ctrl.Reset()
 }
 
 func TestCandidateScoringWithVisibleOverlayOverNormalTarget(t *testing.T) {
+	runWin32Scenario(t, candidateScoringWithVisibleOverlayOverNormalTargetScenario)
+}
+
+func candidateScoringWithVisibleOverlayOverNormalTargetScenario(t *testing.T) {
 	hInst, _, _ := procGetModuleHandleW.Call(0)
 	className, _ := syscall.UTF16PtrFromString("TestNormalScoringClass")
 
@@ -368,8 +389,20 @@ func TestCandidateScoringWithVisibleOverlayOverNormalTarget(t *testing.T) {
 	}
 	defer destroyTestWindow(targetHWND)
 
-	procSetWindowPos.Call(targetHWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
-	time.Sleep(30 * time.Millisecond)
+	// Raise the target to the top of the non-TOPMOST band. A plain HWND_TOP call
+	// from a process that does not own the foreground window cannot reliably
+	// cover a maximized foreground app, which would leave an unrelated window
+	// between the point and the target. Promote-then-demote gives a
+	// deterministic ordering while keeping the window genuinely non-TOPMOST.
+	procSetWindowPos.Call(targetHWND, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)
+	procSetWindowPos.Call(targetHWND, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+	settleWin32(30 * time.Millisecond)
+
+	procGetWindowLongW := user32.NewProc("GetWindowLongW")
+	targetExStyle, _, _ := procGetWindowLongW.Call(targetHWND, ^uintptr(19)) // GWL_EXSTYLE = -20
+	if targetExStyle&WS_EX_TOPMOST != 0 {
+		t.Fatalf("Target window must stay non-TOPMOST for this scenario: exStyle = 0x%x", targetExStyle)
+	}
 
 	targetRoot := platformGetRootWindow(targetHWND)
 
@@ -379,6 +412,7 @@ func TestCandidateScoringWithVisibleOverlayOverNormalTarget(t *testing.T) {
 	if ctrl.overlay == nil {
 		t.Skip("Overlay creation unavailable")
 	}
+	defer ctrl.Reset()
 
 	// Position overlay immediately above target at (1300, 300)
 	ctrl.overlay.setZOrder(targetHWND)
@@ -388,6 +422,13 @@ func TestCandidateScoringWithVisibleOverlayOverNormalTarget(t *testing.T) {
 	// Prove: point-aware platformWindowIDAtPoint(Pt{1300, 300}, ctrl.overlay.hwnd) returns targetRoot!
 	hitBelow := platformWindowIDAtPoint(Pt{X: 1300, Y: 300}, ctrl.overlay.hwnd)
 	if hitBelow != targetRoot {
+		var tr RECT
+		procGetWindowRect.Call(targetHWND, uintptr(unsafe.Pointer(&tr)))
+		raw, _, _ := procWindowFromPoint.Call(packPoint(Pt{X: 1300, Y: 300}))
+		prevOfTarget, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
+		t.Logf("DIAG target=0x%x root=0x%x visible=%v rect=%d,%d,%d,%d raw=0x%x rawRoot=0x%x prevOfTarget=0x%x overlay=0x%x",
+			targetHWND, targetRoot, isWndVisible(targetHWND), tr.Left, tr.Top, tr.Right, tr.Bottom,
+			raw, platformGetRootWindow(raw), prevOfTarget, ctrl.overlay.hwnd)
 		t.Fatalf("platformWindowIDAtPoint below overlay = 0x%x, expected targetRoot 0x%x", hitBelow, targetRoot)
 	}
 
@@ -405,11 +446,13 @@ func TestCandidateScoringWithVisibleOverlayOverNormalTarget(t *testing.T) {
 	if targetHits == 0 {
 		t.Fatalf("bestMotionCandidate targetHits = 0 when overlay is visible over normal target!")
 	}
-
-	ctrl.Reset()
 }
 
 func TestCandidateScoringWithVisibleOverlayOverTopmostTarget(t *testing.T) {
+	runWin32Scenario(t, candidateScoringWithVisibleOverlayOverTopmostTargetScenario)
+}
+
+func candidateScoringWithVisibleOverlayOverTopmostTargetScenario(t *testing.T) {
 	hInst, _, _ := procGetModuleHandleW.Call(0)
 	className, _ := syscall.UTF16PtrFromString("TestTopmostScoringClass")
 
@@ -432,7 +475,7 @@ func TestCandidateScoringWithVisibleOverlayOverTopmostTarget(t *testing.T) {
 	defer destroyTestWindow(targetHWND)
 
 	procSetWindowPos.Call(targetHWND, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
-	time.Sleep(30 * time.Millisecond)
+	settleWin32(30 * time.Millisecond)
 
 	targetRoot := platformGetRootWindow(targetHWND)
 
@@ -442,6 +485,7 @@ func TestCandidateScoringWithVisibleOverlayOverTopmostTarget(t *testing.T) {
 	if ctrl.overlay == nil {
 		t.Skip("Overlay creation unavailable")
 	}
+	defer ctrl.Reset()
 
 	// Place overlay directly over target at (400, 400)
 	ctrl.overlay.setZOrder(targetHWND)
@@ -468,11 +512,13 @@ func TestCandidateScoringWithVisibleOverlayOverTopmostTarget(t *testing.T) {
 	if targetHits == 0 {
 		t.Fatalf("bestMotionCandidate targetHits = 0 when overlay is visible over topmost target!")
 	}
-
-	ctrl.Reset()
 }
 
 func TestOverlayTransitionTopmostToNormalTarget(t *testing.T) {
+	runWin32Scenario(t, overlayTransitionTopmostToNormalTargetScenario)
+}
+
+func overlayTransitionTopmostToNormalTargetScenario(t *testing.T) {
 	hInst, _, _ := procGetModuleHandleW.Call(0)
 	className, _ := syscall.UTF16PtrFromString("TestTransitionClass")
 
@@ -492,7 +538,7 @@ func TestOverlayTransitionTopmostToNormalTarget(t *testing.T) {
 	if targetA == 0 {
 		t.Skip("Could not create targetA window")
 	}
-	defer procDestroyWindow.Call(targetA)
+	defer destroyTestWindow(targetA)
 
 	// Target B = normal non-topmost window at (300, 300, 400, 400)
 	targetB, _, _ := procCreateWindowExW.Call(
@@ -502,23 +548,24 @@ func TestOverlayTransitionTopmostToNormalTarget(t *testing.T) {
 	if targetB == 0 {
 		t.Skip("Could not create targetB window")
 	}
-	defer procDestroyWindow.Call(targetB)
+	defer destroyTestWindow(targetB)
 
 	procShowWindow.Call(targetB, 8) // SW_SHOWNA
-	time.Sleep(30 * time.Millisecond)
+	settleWin32(30 * time.Millisecond)
 
 	ctrl := NewVisualCursorController()
 	ctrl.ensureOverlay()
 	if ctrl.overlay == nil || ctrl.overlay.hwnd == 0 {
 		t.Skip("Overlay creation unavailable")
 	}
+	defer ctrl.Reset()
 
 	procGetWindowLongW := user32.NewProc("GetWindowLongW")
 
 	// 1. Target A = TOPMOST
 	ctrl.SetTargetHWND(targetA)
 	ctrl.MoveToAndWait(350, 350)
-	time.Sleep(30 * time.Millisecond)
+	settleWin32(30 * time.Millisecond)
 
 	exStyleA, _, _ := procGetWindowLongW.Call(ctrl.overlay.hwnd, ^uintptr(19)) // GWL_EXSTYLE = -20
 	if exStyleA&WS_EX_TOPMOST == 0 {
@@ -528,7 +575,7 @@ func TestOverlayTransitionTopmostToNormalTarget(t *testing.T) {
 	// 2. Target B = normal non-topmost
 	ctrl.SetTargetHWND(targetB)
 	ctrl.MoveToAndWait(360, 360)
-	time.Sleep(30 * time.Millisecond)
+	settleWin32(30 * time.Millisecond)
 
 	exStyleB, _, _ := procGetWindowLongW.Call(ctrl.overlay.hwnd, ^uintptr(19)) // GWL_EXSTYLE = -20
 	if exStyleB&WS_EX_TOPMOST != 0 {
@@ -540,8 +587,6 @@ func TestOverlayTransitionTopmostToNormalTarget(t *testing.T) {
 	if pB != ctrl.overlay.hwnd {
 		t.Fatalf("GetWindow(targetB, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", pB, ctrl.overlay.hwnd)
 	}
-
-	ctrl.Reset()
 }
 
 func TestInstrumentedSynchronousCommitGate(t *testing.T) {
@@ -554,6 +599,7 @@ func TestInstrumentedSynchronousCommitGate(t *testing.T) {
 	if ctrl.overlay == nil {
 		t.Skip("Overlay creation unavailable")
 	}
+	defer ctrl.Reset()
 
 	var moveFrameCommitTime time.Time
 	var actionStartTime time.Time
@@ -589,8 +635,6 @@ func TestInstrumentedSynchronousCommitGate(t *testing.T) {
 	if actionStartTime.After(pulseFrameCommitTime) {
 		t.Fatalf("Action start (%v) occurred AFTER pulse frame commit (%v)", actionStartTime, pulseFrameCommitTime)
 	}
-
-	ctrl.Reset()
 }
 
 func TestNoPhysicalMouseInputAPICalls(t *testing.T) {
@@ -627,6 +671,7 @@ func TestOverlayClickThroughStyle(t *testing.T) {
 	if ctrl.overlay == nil || ctrl.overlay.hwnd == 0 {
 		t.Skip("Overlay window unavailable")
 	}
+	defer ctrl.Reset()
 
 	exStyle, _, _ := procGetWindowLongW.Call(ctrl.overlay.hwnd, ^uintptr(19)) // GWL_EXSTYLE = -20
 	if exStyle&WS_EX_TRANSPARENT == 0 {
@@ -636,6 +681,43 @@ func TestOverlayClickThroughStyle(t *testing.T) {
 	if exStyle&WS_EX_NOACTIVATE == 0 {
 		t.Fatalf("Overlay window missing WS_EX_NOACTIVATE style: exStyle = 0x%x", exStyle)
 	}
+}
 
-	ctrl.Reset()
+// TestForegroundWindowStability proves that no overlay operation causes the
+// overlay window to become the foreground window. The assertion is a positive
+// proof (overlay.hwnd != GetForegroundWindow) at each operation, replacing the
+// fragile before==during==after check that can fail when any other app on the
+// desktop legitimately changes the foreground.
+func TestForegroundWindowStability(t *testing.T) {
+	procGetForegroundWindow := user32.NewProc("GetForegroundWindow")
+
+	ctrl := NewVisualCursorController()
+	if ctrl.disabled {
+		t.Skip("OPEN_COMPUTER_USE_VISUAL_CURSOR disabled")
+	}
+	ctrl.ensureOverlay()
+	if ctrl.overlay == nil || ctrl.overlay.hwnd == 0 {
+		t.Skip("Overlay creation unavailable")
+	}
+	defer ctrl.Reset()
+
+	checkNotForeground := func(op string) {
+		t.Helper()
+		fg, _, _ := procGetForegroundWindow.Call()
+		if fg == ctrl.overlay.hwnd {
+			t.Fatalf("Overlay became foreground window during %s: overlay=0x%x", op, ctrl.overlay.hwnd)
+		}
+	}
+
+	ctrl.MoveToAndWait(400, 400)
+	checkNotForeground("MoveToAndWait")
+
+	ctrl.PulseClickAndWait(400, 400, 1, "left")
+	checkNotForeground("PulseClickAndWait")
+
+	ctrl.Settle(400, 400)
+	checkNotForeground("Settle")
+
+	ctrl.SetTargetHWND(0)
+	checkNotForeground("SetTargetHWND")
 }
