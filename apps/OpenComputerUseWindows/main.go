@@ -169,18 +169,40 @@ func (limit textLimit) runtimeValue() any {
 }
 
 type psResponse struct {
-	OK       bool         `json:"ok"`
-	Text     string       `json:"text,omitempty"`
-	Error    string       `json:"error,omitempty"`
-	Snapshot *appSnapshot `json:"snapshot,omitempty"`
+	OK                        bool           `json:"ok"`
+	Text                      string         `json:"text,omitempty"`
+	Error                     string         `json:"error,omitempty"`
+	Snapshot                  *appSnapshot   `json:"snapshot,omitempty"`
+	EffectiveDpiContextIsPMv2 bool           `json:"effectiveDpiContextIsPMv2,omitempty"`
+	GetWindowRect             *rectJSON      `json:"getWindowRect,omitempty"`
+	UIABoundingRectangle      *uiaBoundsJSON `json:"uiaBoundingRectangle,omitempty"`
+	WindowBounds              *frame         `json:"windowBounds,omitempty"`
+}
+
+type rectJSON struct {
+	Left   int32 `json:"left"`
+	Top    int32 `json:"top"`
+	Right  int32 `json:"right"`
+	Bottom int32 `json:"bottom"`
+}
+
+type uiaBoundsJSON struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 type service struct {
-	snapshots map[string]*appSnapshot
+	snapshots    map[string]*appSnapshot
+	visualCursor *VisualCursorController
 }
 
 func newService() *service {
-	return &service{snapshots: map[string]*appSnapshot{}}
+	return &service{
+		snapshots:    map[string]*appSnapshot{},
+		visualCursor: NewVisualCursorController(),
+	}
 }
 
 func (s *service) callTool(name string, args map[string]any) toolCallResult {
@@ -319,7 +341,19 @@ func (s *service) click(app, elementIndex string, x, y *float64, clickCount int,
 		}
 		request.Element = record
 	}
-	return s.actionResult(app, request)
+	var target *Pt
+	if snapshot.WindowBounds != nil {
+		target = resolveVisualCursorTarget(request.Element, x, y, snapshot.WindowBounds)
+	}
+	if target != nil && s.visualCursor != nil {
+		s.visualCursor.SetTargetHWND(targetHWNDFromSnapshot(snapshot))
+		s.visualCursor.MoveToAndWait(target.X, target.Y)
+	}
+	result := s.actionResult(app, request)
+	if target != nil && !result.IsError && s.visualCursor != nil {
+		s.visualCursor.PulseClickAndWait(target.X, target.Y, clickCount, mouseButton)
+	}
+	return result
 }
 
 func (s *service) performSecondaryAction(app, elementIndex, action string) toolCallResult {
@@ -432,7 +466,19 @@ func (s *service) setValue(app, elementIndex, value string) toolCallResult {
 	if err != nil {
 		return textResult(err.Error(), true)
 	}
-	return s.actionResult(app, psRequest{Tool: "set_value", App: app, Element: record, Value: value})
+	var target *Pt
+	if snapshot.WindowBounds != nil {
+		target = resolveVisualCursorTarget(record, nil, nil, snapshot.WindowBounds)
+	}
+	if target != nil && s.visualCursor != nil {
+		s.visualCursor.SetTargetHWND(targetHWNDFromSnapshot(snapshot))
+		s.visualCursor.MoveToAndWait(target.X, target.Y)
+	}
+	result := s.actionResult(app, psRequest{Tool: "set_value", App: app, Element: record, Value: value})
+	if target != nil && !result.IsError && s.visualCursor != nil {
+		s.visualCursor.Settle(target.X, target.Y)
+	}
+	return result
 }
 
 func (s *service) actionResult(app string, request psRequest) toolCallResult {
@@ -1197,7 +1243,12 @@ func handleMCPRequest(request map[string]any, svc *service) map[string]any {
 			"capabilities": map[string]any{"tools": map[string]any{"listChanged": false}},
 			"instructions": serverInstructions,
 		})
-	case "notifications/initialized", "notifications/turn-ended":
+	case "notifications/initialized":
+		return nil
+	case "notifications/turn-ended":
+		if svc != nil && svc.visualCursor != nil {
+			svc.visualCursor.Reset()
+		}
 		return nil
 	case "ping":
 		return jsonRPCResult(id, map[string]any{})

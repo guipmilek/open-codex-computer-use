@@ -77,6 +77,7 @@
 - [x] 收紧 Windows 后台运行默认策略：找不到 app 时不再自动启动，`SetFocus` 默认禁用，只能通过环境变量显式开启。
 - [x] 将 `type_text` 默认路径从 UIA `ValuePattern.SetValue` 改为 child HWND `EM_SETSEL` / `EM_REPLACESEL` 优先；可能把 app 带到前台的 UIA text fallback 改成环境变量显式开启。
 - [x] 通过交互式 Windows scheduled task 验证新 `type_text` 路径：`get_app_state -> type_text -> get_app_state` 三步均 `isError=false`，Notepad 文本包含 `bgmsg-*` marker，前台窗口调用前后均为 Codex。
+- [x] 实现 Windows 原生 Go Visual Cursor Overlay (`WS_EX_LAYERED` + `UpdateLayeredWindow`)，1:1 复刻 macOS 1:1 Motion Model (Heading-driven Bezier, Spring physical simulation, Visual Dynamics lag/fog) 与 tip anchor/fresh-start 姿态 (`60.35, 70.3`)，支持 `OPEN_COMPUTER_USE_VISUAL_CURSOR=0` 显式禁用与无 GUI 桌面/SSH 优雅 fallback。
 - [ ] 在交互式 Windows 桌面 session 补 Notepad / Edge 等真实 UI action smoke。
 - [ ] 增加 Windows fixture 和可重复 smoke runner。
 - [ ] 评估用 `PrintWindow` / Windows Graphics Capture 补一条不依赖窗口可见性的 background screenshot 路径。
@@ -97,3 +98,4 @@
 - 2026-04-22：Notepad 实测反馈 `type_text` 的 UIA `ValuePattern.SetValue` 会把窗口带到前台；默认改为 child HWND `EM_REPLACESEL` 后台消息路径，旧 UIA fallback 需要 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_FALLBACK=1`。
 - 2026-04-22：Windows 交互式 scheduled task 验证显示新 `type_text` 能写入 Notepad 且不会把前台从 Codex 切到 Notepad；Notepad 文本控件 UIA class 为 `RichEditD2DPT`，有 child native handle，可接收 `EM_REPLACESEL`。
 - 2026-04-23：Windows release artifact 接入 npm package bundled artifacts，不新增系统 installer/signing；root `open-computer-use` package 通过 launcher 按 `win32-arm64` / `win32-x64` 自动选择 `.exe`。
+- 2026-08-12：在 `apps/OpenComputerUseWindows` 中完整实现 Windows 原生 Visual Cursor Overlay，包含 `cursor_motion.go` (1:1 CursorMotionModel)、`cursor_target.go` (动作/游标屏幕坐标统一解析)、`cursor_overlay.go` (同步 MoveToAndWait/PulseClickAndWait/Settle 控制器)、`cursor_renderer_windows.go` (1:1 Swift 逆矩阵 DIB 渲染) 和 `cursor_overlay_windows.go` (`WS_EX_LAYERED` 窗口、Per-Monitor DPI V2 物理像素契约、packed POINT x64 ABI、GA_ROOT 归一化、SWP_NOZORDER 保护与 120ms easeInEaseOut fade)，支持 `OPEN_COMPUTER_USE_VISUAL_CURSOR` 开关与无 GUI 桌面 Graceful degradation。

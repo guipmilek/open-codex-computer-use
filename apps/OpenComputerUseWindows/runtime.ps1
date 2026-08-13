@@ -12,11 +12,11 @@ $AccessibilityTreeMaxDepth = 64
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Drawing
+$null = Add-Type -AssemblyName UIAutomationClient
+$null = Add-Type -AssemblyName UIAutomationTypes
+$null = Add-Type -AssemblyName System.Drawing
 
-Add-Type -TypeDefinition @"
+$null = Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
@@ -49,8 +49,30 @@ public static class OCUWin32 {
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessage(IntPtr hWnd, UInt32 msg, IntPtr wParam, string lParam);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetThreadDpiAwarenessContext();
+
+    [DllImport("user32.dll")]
+    public static extern bool AreDpiAwarenessContextsEqual(IntPtr ctx1, IntPtr ctx2);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
 }
 "@
+
+try {
+    $PMv2 = [IntPtr]::new(-4)
+    $null = [OCUWin32]::SetThreadDpiAwarenessContext($PMv2)
+    $effectiveDpiCtx = [OCUWin32]::GetThreadDpiAwarenessContext()
+    $isPMv2 = [OCUWin32]::AreDpiAwarenessContextsEqual($effectiveDpiCtx, $PMv2)
+    if (-not $isPMv2) {
+        $null = [OCUWin32]::SetProcessDPIAware()
+    }
+} catch {}
 
 $WM_SETTEXT = 0x000C
 $WM_MOUSEMOVE = 0x0200
@@ -833,7 +855,7 @@ function Test-TextWindowHandleCandidate($process, $element) {
     if ($handle -eq [IntPtr]::Zero -or $handle -eq [IntPtr]$process.MainWindowHandle) {
         return $false
     }
-    $controlType = Get-ElementControlTypeName $element
+    $controlType = Get-ElementControlTypeName $element "ClassName"
     $className = Get-ElementString $element "ClassName"
     return (
         $controlType -like "*Edit*" -or
@@ -875,7 +897,6 @@ function Invoke-TypeText($process, [string]$text) {
     if ($targetHwnd -ne [IntPtr]::Zero -and (Send-TextToEditHandle $targetHwnd $text $element)) {
         return $true
     }
-
     if ($null -ne $element) {
         $valuePattern = Get-CurrentPatternOrNull $element ([Windows.Automation.ValuePattern]::Pattern)
         if ($null -ne $valuePattern -and -not $valuePattern.Current.IsReadOnly) {
@@ -988,6 +1009,38 @@ try {
                     throw "Cannot set a value for an element that is not settable"
                 }
                 $valuePattern.SetValue($operation.value)
+            }
+            "dpi_diagnostics" {
+                $PMv2 = [IntPtr]::new(-4)
+                $eff = [OCUWin32]::GetThreadDpiAwarenessContext()
+                $isPMv2 = [OCUWin32]::AreDpiAwarenessContextsEqual($eff, $PMv2)
+
+                $windowElement = Get-MainElement $process
+                $windowBounds = Get-WindowBounds $process $windowElement
+                if ($null -eq $windowBounds) {
+                    throw "dpi_diagnostics could not resolve positive window bounds"
+                }
+
+                $rect = New-Object OCUWin32+RECT
+                $gotWindowRect = [OCUWin32]::GetWindowRect($hwnd, [ref]$rect)
+                if (-not $gotWindowRect) {
+                    throw "dpi_diagnostics GetWindowRect failed"
+                }
+
+                $uiaBounds = $windowElement.Current.BoundingRectangle
+                if ($uiaBounds.IsEmpty -or $uiaBounds.Width -le 0 -or $uiaBounds.Height -le 0) {
+                    throw "dpi_diagnostics UIA BoundingRectangle is empty"
+                }
+
+                $response = [pscustomobject]@{
+                    ok = $true
+                    effectiveDpiContextIsPMv2 = $isPMv2
+                    getWindowRect = [pscustomobject]@{ left = $rect.Left; top = $rect.Top; right = $rect.Right; bottom = $rect.Bottom }
+                    uiaBoundingRectangle = [pscustomobject]@{ x = $uiaBounds.X; y = $uiaBounds.Y; width = $uiaBounds.Width; height = $uiaBounds.Height }
+                    windowBounds = $windowBounds
+                }
+                $response | ConvertTo-Json -Depth 8 | Write-Output
+                exit 0
             }
             default {
                 throw "unsupportedTool(`"$($operation.tool)`")"
