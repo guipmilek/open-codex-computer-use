@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"syscall"
 	"testing"
 )
 
@@ -78,6 +77,7 @@ func TestSynchronousOrderCommitmentSequence(t *testing.T) {
 	if ctrl.disabled {
 		t.Skip("Skipping synchronous sequence test: OPEN_COMPUTER_USE_VISUAL_CURSOR is disabled")
 	}
+	defer ctrl.Reset()
 
 	var executionLog []string
 
@@ -97,29 +97,5 @@ func TestSynchronousOrderCommitmentSequence(t *testing.T) {
 		if executionLog[i] != step {
 			t.Fatalf("Execution sequence mismatch at index %d: got %q, want %q", i, executionLog[i], step)
 		}
-	}
-
-	ctrl.Reset()
-}
-
-func TestForegroundWindowStability(t *testing.T) {
-	user32 := syscall.NewLazyDLL("user32.dll")
-	procGetForegroundWindow := user32.NewProc("GetForegroundWindow")
-
-	fgBefore, _, _ := procGetForegroundWindow.Call()
-
-	ctrl := NewVisualCursorController()
-	ctrl.MoveToAndWait(400, 400)
-	ctrl.PulseClickAndWait(400, 400, 1, "left")
-	ctrl.Settle(400, 400)
-
-	fgDuring, _, _ := procGetForegroundWindow.Call()
-
-	ctrl.Reset()
-
-	fgAfter, _, _ := procGetForegroundWindow.Call()
-
-	if fgBefore != 0 && (fgBefore != fgDuring || fgBefore != fgAfter) {
-		t.Fatalf("Foreground window changed! Before=0x%x, During=0x%x, After=0x%x", fgBefore, fgDuring, fgAfter)
 	}
 }

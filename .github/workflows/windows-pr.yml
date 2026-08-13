@@ -51,6 +51,8 @@ jobs:
       - name: Build
         run: go build ./...
 
+  # Each Win32 integration test is also run in isolation so a hang in one
+  # scenario does not mask a timeout in another.
   win32-integration:
     name: Win32 / ${{ matrix.test }}
     runs-on: windows-latest
@@ -61,11 +63,11 @@ jobs:
         test:
           - TestMonitorFromPointIntegration
           - TestWindowFromPointIntegration
-          - TestLockedPlatformWindowIDAtPointOverlappingGeometry
-          - TestLockedThreeWindowZOrderIntegration
-          - TestLockedCandidateScoringWithVisibleOverlayOverNormalTarget
-          - TestLockedCandidateScoringWithVisibleOverlayOverTopmostTarget
-          - TestLockedOverlayTransitionTopmostToNormalTarget
+          - TestPlatformWindowIDAtPointOverlappingGeometry
+          - TestThreeWindowZOrderIntegration
+          - TestCandidateScoringWithVisibleOverlayOverNormalTarget
+          - TestCandidateScoringWithVisibleOverlayOverTopmostTarget
+          - TestOverlayTransitionTopmostToNormalTarget
           - TestInstrumentedSynchronousCommitGate
           - TestForegroundWindowStability
 
@@ -85,6 +87,31 @@ jobs:
       - name: Run isolated Win32 integration test
         shell: pwsh
         run: go test -v -count=1 -timeout 45s -run "^${{ matrix.test }}$" ./...
+
+  # Run all Win32 HWND scenarios together in the same test binary to catch
+  # cross-test interference (state leakage, Z-order pollution, orphan windows).
+  win32-integration-suite:
+    name: Win32 / full suite cross-test
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: apps/OpenComputerUseWindows
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Set up Go 1.26
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: "1.26.x"
+
+      - name: Run Win32 integration tests together (cross-test interference check)
+        shell: pwsh
+        run: |
+          go test -v -count=1 -timeout 5m -run "^(TestMonitorFromPointIntegration|TestWindowFromPointIntegration|TestPlatformWindowIDAtPointOverlappingGeometry|TestThreeWindowZOrderIntegration|TestCandidateScoringWithVisibleOverlayOverNormalTarget|TestCandidateScoringWithVisibleOverlayOverTopmostTarget|TestOverlayTransitionTopmostToNormalTarget|TestInstrumentedSynchronousCommitGate|TestForegroundWindowStability)$" ./...
 
   build-windows-arm64:
     name: Windows arm64 cross-build
