@@ -262,16 +262,9 @@ func (c *VisualCursorController) SetTargetHWND(hwnd uintptr) {
 // --- Internal animation & math helpers ---
 
 func (c *VisualCursorController) clampTipPosition(tip Pt) Pt {
-	workArea := platformMonitorWorkArea(tip)
-	minX := workArea.MinX() + cursorTipAnchorX
-	maxX := workArea.MaxX() - (cursorWindowSize - cursorTipAnchorX)
-	minY := workArea.MinY() + cursorTipAnchorY
-	maxY := workArea.MaxY() - (cursorWindowSize - cursorTipAnchorY)
-
-	return Pt{
-		X: clampF(tip.X, minX, maxX),
-		Y: clampF(tip.Y, minY, maxY),
-	}
+	// The visual tip must exactly match the action point, even if the overlay bitmap
+	// goes partially or fully off-screen. Win32 UpdateLayeredWindow handles off-screen clipping automatically.
+	return tip
 }
 
 func (c *VisualCursorController) motionBounds(start, end Pt) *Rect {

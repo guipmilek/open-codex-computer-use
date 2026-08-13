@@ -17,8 +17,8 @@ import (
 )
 
 var (
-	procGetCursorPos = user32.NewProc("GetCursorPos")
-	procGetActiveWindow = user32.NewProc("GetActiveWindow")
+	procGetCursorPos        = user32.NewProc("GetCursorPos")
+	procGetActiveWindow     = user32.NewProc("GetActiveWindow")
 	procEnumDisplayMonitors = user32.NewProc("EnumDisplayMonitors")
 )
 
@@ -78,12 +78,14 @@ func TestPrecisionHarness(t *testing.T) {
 		// Add points at 10px intervals along edges
 		for i := 0; i < 19; i++ { // fill up to 50
 			x := float64(i * 10)
-			if x > 800 { x = 800 }
+			if x > 800 {
+				x = 800
+			}
 			pts = append(pts, ptTest{rx: x, ry: 0, desc: fmt.Sprintf("EdgeTop%d", i)})
 		}
 
 		type result struct {
-			desc string
+			desc   string
 			tx, ty float64
 			vx, vy float64
 			err    float64
@@ -105,16 +107,16 @@ func TestPrecisionHarness(t *testing.T) {
 			// Simulate updateFrame
 			rs := ctrl.initialRenderState(*target)
 			ctrl.overlay.updateFrame(target.X, target.Y, rs, 0)
-			
+
 			vx := float64(ctrl.overlay.lastPos.X) + cursorTipAnchorX
 			vy := float64(ctrl.overlay.lastPos.Y) + cursorTipAnchorY
-			
+
 			err := math.Sqrt(math.Pow(vx-target.X, 2) + math.Pow(vy-target.Y, 2))
 			results = append(results, result{p.desc, target.X, target.Y, vx, vy, err})
 			errors = append(errors, err)
-			
+
 			t.Logf("%-15s | %10.2f %10.2f | %10.2f %10.2f | %10.4f", p.desc, target.X, target.Y, vx, vy, err)
-			
+
 			if err > 1.0 {
 				t.Errorf("Point %s visual_action_error > 1.0: %v", p.desc, err)
 			}
@@ -125,7 +127,9 @@ func TestPrecisionHarness(t *testing.T) {
 		max := errors[len(errors)-1]
 		p95 := errors[int(0.95*float64(len(errors)))]
 		sum := 0.0
-		for _, e := range errors { sum += e }
+		for _, e := range errors {
+			sum += e
+		}
 		mean := sum / float64(len(errors))
 
 		t.Logf("\nStats: Min=%.4f, Mean=%.4f, P95=%.4f, Max=%.4f", min, mean, p95, max)
@@ -147,24 +151,24 @@ func TestTemporalOrdering100Cycles(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		x, y := 100.0+float64(i%10)*10, 100.0+float64(i/10)*10
-		
+
 		t0 := time.Now()
 		ctrl.MoveToAndWait(x, y)
 		t1 := ctrl.overlay.lastCommitTime
-		
+
 		time.Sleep(1 * time.Millisecond)
 		t2 := time.Now()
-		
+
 		ctrl.PulseClickAndWait(x, y, 1, "left")
 		t3 := ctrl.overlay.lastCommitTime
-		
+
 		if !t1.Before(t2) {
 			t.Fatalf("Cycle %d: FrameCommitted (%v) not before ActionBegan (%v)", i, t1, t2)
 		}
 		if !t2.Before(t3) {
 			t.Fatalf("Cycle %d: ActionBegan (%v) not before PulseCommitted (%v)", i, t2, t3)
 		}
-		
+
 		d1 = append(d1, t1.Sub(t0))
 		d2 = append(d2, t2.Sub(t1))
 		d3 = append(d3, t3.Sub(t2))
@@ -179,7 +183,7 @@ func TestTemporalOrdering100Cycles(t *testing.T) {
 		p99 := d[int(0.99*float64(len(d)))]
 		t.Logf("%s Latencies: Min=%v, P50=%v, P95=%v, P99=%v, Max=%v", name, min, p50, p95, p99, max)
 	}
-	
+
 	reportStats("T1-T0 (Move)", d1)
 	reportStats("T2-T1 (Wait)", d2)
 	reportStats("T3-T2 (Pulse)", d3)
@@ -187,7 +191,9 @@ func TestTemporalOrdering100Cycles(t *testing.T) {
 
 func TestPhysicalCursorStability(t *testing.T) {
 	ctrl := NewVisualCursorController()
-	if ctrl.disabled { t.Skip("Visual cursor disabled") }
+	if ctrl.disabled {
+		t.Skip("Visual cursor disabled")
+	}
 	defer ctrl.Reset()
 
 	r := rand.New(rand.NewSource(99))
@@ -204,13 +210,13 @@ func TestPhysicalCursorStability(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		rx, ry := 100.0+r.Float64()*500, 100.0+r.Float64()*500
-		
+
 		before := getCursor()
 		ctrl.MoveToAndWait(rx, ry)
 		during := getCursor()
 		ctrl.PulseClickAndWait(rx, ry, 1, "left")
 		after := getCursor()
-		
+
 		dist := func(p1, p2 POINT) float64 {
 			return math.Sqrt(float64((p1.X-p2.X)*(p1.X-p2.X) + (p1.Y-p2.Y)*(p1.Y-p2.Y)))
 		}
@@ -227,9 +233,13 @@ func TestPhysicalCursorStability(t *testing.T) {
 
 func TestStressResourceLeaks(t *testing.T) {
 	ctrl := NewVisualCursorController()
-	if ctrl.disabled { t.Skip("Visual cursor disabled") }
+	if ctrl.disabled {
+		t.Skip("Visual cursor disabled")
+	}
 	ctrl.ensureOverlay()
-	if ctrl.overlay == nil { t.Skip("Overlay unavailable") }
+	if ctrl.overlay == nil {
+		t.Skip("Overlay unavailable")
+	}
 
 	time.Sleep(10 * time.Millisecond) // settle
 	initialGoroutines := runtime.NumGoroutine()
@@ -320,8 +330,8 @@ func TestMultiMonitorMathSimulation(t *testing.T) {
 		return Rect{X: minX, Y: minY, W: maxX - minX, H: maxY - minY}
 	}
 
-	scenarios := []struct{
-		a, b Rect
+	scenarios := []struct {
+		a, b     Rect
 		expected Rect
 	}{
 		{Rect{0, 0, 1920, 1080}, Rect{-1920, 0, 1920, 1080}, Rect{-1920, 0, 3840, 1080}},
@@ -338,10 +348,10 @@ func TestMultiMonitorMathSimulation(t *testing.T) {
 
 	// Enumerate real monitors
 	type MONITORINFO struct {
-		CbSize uint32
+		CbSize    uint32
 		RcMonitor struct{ Left, Top, Right, Bottom int32 }
-		RcWork struct{ Left, Top, Right, Bottom int32 }
-		DwFlags uint32
+		RcWork    struct{ Left, Top, Right, Bottom int32 }
+		DwFlags   uint32
 	}
 	cb := syscall.NewCallback(func(hMonitor, hdcMonitor, lprcMonitor, dwData uintptr) uintptr {
 		var mi MONITORINFO
