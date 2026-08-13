@@ -57,6 +57,38 @@ func TestPowerShellDPIDiagnosticsUsingEmbeddedScript(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("Real runtime.ps1 returned OK=false for dpi_diagnostics")
 	}
+
+	if !resp.EffectiveDpiContextIsPMv2 {
+		t.Fatalf("Effective DPI context is NOT Per-Monitor V2 (effectiveDpiContextIsPMv2=false)")
+	}
+
+	if resp.GetWindowRect == nil {
+		t.Fatalf("getWindowRect is nil in dpi_diagnostics response")
+	}
+
+	rectW := resp.GetWindowRect.Right - resp.GetWindowRect.Left
+	rectH := resp.GetWindowRect.Bottom - resp.GetWindowRect.Top
+
+	if rectW <= 0 || rectH <= 0 {
+		t.Fatalf("getWindowRect dimensions are not positive: width=%d, height=%d", rectW, rectH)
+	}
+
+	if resp.WindowBounds != nil {
+		if resp.WindowBounds.Width <= 0 || resp.WindowBounds.Height <= 0 {
+			t.Fatalf("windowBounds dimensions are not positive: %v", resp.WindowBounds)
+		}
+	}
+
+	if resp.UIABoundingRectangle != nil {
+		if resp.UIABoundingRectangle.Width <= 0 || resp.UIABoundingRectangle.Height <= 0 {
+			t.Fatalf("uiaBoundingRectangle dimensions are not positive: %v", resp.UIABoundingRectangle)
+		}
+		diffW := math.Abs(float64(rectW) - resp.UIABoundingRectangle.Width)
+		diffH := math.Abs(float64(rectH) - resp.UIABoundingRectangle.Height)
+		if diffW > 20 || diffH > 20 {
+			t.Fatalf("Inconsistency between GetWindowRect (%dx%d) and UIA BoundingRectangle (%.0fx%.0f)", rectW, rectH, resp.UIABoundingRectangle.Width, resp.UIABoundingRectangle.Height)
+		}
+	}
 }
 
 func TestMonitorFromPointIntegration(t *testing.T) {
@@ -94,7 +126,7 @@ func TestWindowFromPointIntegration(t *testing.T) {
 
 	wc := WNDCLASSEX{
 		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
-		LpfnWndProc:   syscall.NewCallback(wndProc),
+		LpfnWndProc:   procDefWindowProcW.Addr(),
 		HInstance:     hInst,
 		LpszClassName: className,
 	}
@@ -131,7 +163,7 @@ func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
 
 	wc := WNDCLASSEX{
 		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
-		LpfnWndProc:   syscall.NewCallback(wndProc),
+		LpfnWndProc:   procDefWindowProcW.Addr(),
 		HInstance:     hInst,
 		LpszClassName: className,
 	}
@@ -145,7 +177,7 @@ func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
 	if targetHWND == 0 {
 		t.Skip("Could not create target window")
 	}
-	defer procDestroyWindow.Call(targetHWND)
+	defer destroyTestWindow(targetHWND)
 
 	// Unrelated window at (0, 0, 100, 100) -> [0, 100] (DOES NOT contain P(400, 400))
 	unrelatedHWND, _, _ := procCreateWindowExW.Call(
@@ -155,7 +187,7 @@ func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
 	if unrelatedHWND == 0 {
 		t.Skip("Could not create unrelated window")
 	}
-	defer procDestroyWindow.Call(unrelatedHWND)
+	defer destroyTestWindow(unrelatedHWND)
 
 	// Overlay window at (200, 200, 500, 500) -> [200, 700] (CONTAINS P(400, 400))
 	overlayHWND, _, _ := procCreateWindowExW.Call(
@@ -165,7 +197,7 @@ func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
 	if overlayHWND == 0 {
 		t.Skip("Could not create overlay window")
 	}
-	defer procDestroyWindow.Call(overlayHWND)
+	defer destroyTestWindow(overlayHWND)
 
 	// Set Z-order: overlay (top) > unrelated (middle) > target (bottom)
 	procSetWindowPos.Call(targetHWND, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
@@ -178,6 +210,7 @@ func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
 
 	// 1. Raw WindowFromPoint(P) must hit overlayHWND
 	hitOverlay, _, _ := procWindowFromPoint.Call(packedP)
+	t.Logf("raw hitOverlay=0x%x, overlayHWND=0x%x", hitOverlay, overlayHWND)
 	if hitOverlay != overlayHWND {
 		t.Fatalf("Raw WindowFromPoint(P) = 0x%x, expected overlay 0x%x", hitOverlay, overlayHWND)
 	}
@@ -185,9 +218,17 @@ func TestPlatformWindowIDAtPointOverlappingGeometry(t *testing.T) {
 	// 2. Point-aware platformWindowIDAtPoint(P, overlayHWND) must skip unrelatedHWND (out of bounds) and return targetRoot!
 	targetRoot := platformGetRootWindow(targetHWND)
 	hitResolved := platformWindowIDAtPoint(P, overlayHWND)
+	t.Logf("hitResolved=0x%x, targetRoot=0x%x", hitResolved, targetRoot)
 
 	if hitResolved != targetRoot {
 		t.Fatalf("platformWindowIDAtPoint(P, overlay) = 0x%x, expected targetRoot 0x%x", hitResolved, targetRoot)
+	}
+}
+
+func destroyTestWindow(hwnd uintptr) {
+	if hwnd != 0 {
+		procShowWindow.Call(hwnd, 0) // SW_HIDE
+		procDestroyWindow.Call(hwnd)
 	}
 }
 
@@ -211,7 +252,7 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 
 	wc := WNDCLASSEX{
 		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
-		LpfnWndProc:   syscall.NewCallback(wndProc),
+		LpfnWndProc:   procDefWindowProcW.Addr(),
 		HInstance:     hInst,
 		LpszClassName: className,
 	}
@@ -225,7 +266,7 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	if targetHWND == 0 {
 		t.Skip("Could not create target window")
 	}
-	defer procDestroyWindow.Call(targetHWND)
+	defer destroyTestWindow(targetHWND)
 
 	unrelatedHWND, _, _ := procCreateWindowExW.Call(
 		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
@@ -234,7 +275,7 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	if unrelatedHWND == 0 {
 		t.Skip("Could not create unrelated window")
 	}
-	defer procDestroyWindow.Call(unrelatedHWND)
+	defer destroyTestWindow(unrelatedHWND)
 
 	// Show without activation to avoid stealing focus
 	procShowWindow.Call(unrelatedHWND, 8) // SW_SHOWNA
@@ -246,6 +287,7 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 
 	ctrl := NewVisualCursorController()
+	ctrl.SetTargetHWND(targetHWND)
 	ctrl.ensureOverlay()
 	if ctrl.overlay == nil || ctrl.overlay.hwnd == 0 {
 		t.Skip("Overlay creation unavailable")
@@ -254,10 +296,8 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	targetRoot := platformGetRootWindow(targetHWND)
 	unrelatedRoot := platformGetRootWindow(unrelatedHWND)
 
-	// Position overlay immediately above target
-	ctrl.overlay.updateFrame(200, 200, ctrl.initialRenderState(Pt{X: 200, Y: 200}), 0)
-	ctrl.overlay.setZOrder(targetHWND)
-	ctrl.overlay.show()
+	// MoveToAndWait exercises ensureOverlay, refreshActiveOrderingIfNeeded, and initial placement
+	ctrl.MoveToAndWait(200, 200)
 	time.Sleep(30 * time.Millisecond)
 
 	// Assert BOTH Z-order relations:
@@ -273,9 +313,9 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 		t.Fatalf("getPrevVisibleRootWindow(overlay) = 0x%x, expected unrelated 0x%x", pOverlay, unrelatedRoot)
 	}
 
-	// Repeat setZOrder(targetHWND) 3+ times and re-verify BOTH relations
+	// Repeat setZOrder(targetHWND) 3+ times via SetTargetHWND and re-verify BOTH relations
 	for i := 0; i < 3; i++ {
-		ctrl.overlay.setZOrder(targetHWND)
+		ctrl.SetTargetHWND(targetHWND)
 		time.Sleep(10 * time.Millisecond)
 
 		pT, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
@@ -290,7 +330,6 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	}
 
 	// Test small movement (<= 2px): initial at (200, 200), small step to (201, 201)
-	ctrl.MoveToAndWait(200, 200)
 	ctrl.MoveToAndWait(201, 201)
 	time.Sleep(30 * time.Millisecond)
 
@@ -307,13 +346,76 @@ func TestThreeWindowZOrderIntegration(t *testing.T) {
 	ctrl.Reset()
 }
 
-func TestCandidateScoringWithVisibleOverlayOverTarget(t *testing.T) {
+func TestCandidateScoringWithVisibleOverlayOverNormalTarget(t *testing.T) {
 	hInst, _, _ := procGetModuleHandleW.Call(0)
-	className, _ := syscall.UTF16PtrFromString("TestScoringClass")
+	className, _ := syscall.UTF16PtrFromString("TestNormalScoringClass")
 
 	wc := WNDCLASSEX{
 		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
-		LpfnWndProc:   syscall.NewCallback(wndProc),
+		LpfnWndProc:   procDefWindowProcW.Addr(),
+		HInstance:     hInst,
+		LpszClassName: className,
+	}
+	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+
+	// Target window (Normal Non-Topmost representative of Notepad/Explorer) at (1200, 200, 400, 400)
+	targetHWND, _, _ := procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
+		1200, 200, 400, 400, 0, 0, hInst, 0,
+	)
+	if targetHWND == 0 {
+		t.Skip("Could not create target window")
+	}
+	defer destroyTestWindow(targetHWND)
+
+	procSetWindowPos.Call(targetHWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
+	time.Sleep(30 * time.Millisecond)
+
+	targetRoot := platformGetRootWindow(targetHWND)
+
+	ctrl := NewVisualCursorController()
+	ctrl.SetTargetHWND(targetHWND)
+	ctrl.ensureOverlay()
+	if ctrl.overlay == nil {
+		t.Skip("Overlay creation unavailable")
+	}
+
+	// Position overlay immediately above target at (1300, 300)
+	ctrl.overlay.setZOrder(targetHWND)
+	ctrl.overlay.updateFrame(1300, 300, ctrl.initialRenderState(Pt{X: 1300, Y: 300}), 0)
+	ctrl.overlay.show()
+
+	// Prove: point-aware platformWindowIDAtPoint(Pt{1300, 300}, ctrl.overlay.hwnd) returns targetRoot!
+	hitBelow := platformWindowIDAtPoint(Pt{X: 1300, Y: 300}, ctrl.overlay.hwnd)
+	if hitBelow != targetRoot {
+		t.Fatalf("platformWindowIDAtPoint below overlay = 0x%x, expected targetRoot 0x%x", hitBelow, targetRoot)
+	}
+
+	// Evaluate candidate trajectory and count target hits
+	cand := ctrl.bestMotionCandidate(Pt{X: 1250, Y: 250}, Pt{X: 1350, Y: 350})
+	pts := cand.Path.SampledConstraintPoints(10)
+	targetHits := 0
+	for _, pt := range pts {
+		wnd := platformWindowIDAtPoint(pt, ctrl.overlay.hwnd)
+		if wnd == targetRoot {
+			targetHits++
+		}
+	}
+
+	if targetHits == 0 {
+		t.Fatalf("bestMotionCandidate targetHits = 0 when overlay is visible over normal target!")
+	}
+
+	ctrl.Reset()
+}
+
+func TestCandidateScoringWithVisibleOverlayOverTopmostTarget(t *testing.T) {
+	hInst, _, _ := procGetModuleHandleW.Call(0)
+	className, _ := syscall.UTF16PtrFromString("TestTopmostScoringClass")
+
+	wc := WNDCLASSEX{
+		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
+		LpfnWndProc:   procDefWindowProcW.Addr(),
 		HInstance:     hInst,
 		LpszClassName: className,
 	}
@@ -327,7 +429,7 @@ func TestCandidateScoringWithVisibleOverlayOverTarget(t *testing.T) {
 	if targetHWND == 0 {
 		t.Skip("Could not create target window")
 	}
-	defer procDestroyWindow.Call(targetHWND)
+	defer destroyTestWindow(targetHWND)
 
 	procSetWindowPos.Call(targetHWND, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
 	time.Sleep(30 * time.Millisecond)
@@ -364,7 +466,79 @@ func TestCandidateScoringWithVisibleOverlayOverTarget(t *testing.T) {
 	}
 
 	if targetHits == 0 {
-		t.Fatalf("bestMotionCandidate targetHits = 0 when overlay is visible over target!")
+		t.Fatalf("bestMotionCandidate targetHits = 0 when overlay is visible over topmost target!")
+	}
+
+	ctrl.Reset()
+}
+
+func TestOverlayTransitionTopmostToNormalTarget(t *testing.T) {
+	hInst, _, _ := procGetModuleHandleW.Call(0)
+	className, _ := syscall.UTF16PtrFromString("TestTransitionClass")
+
+	wc := WNDCLASSEX{
+		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
+		LpfnWndProc:   procDefWindowProcW.Addr(),
+		HInstance:     hInst,
+		LpszClassName: className,
+	}
+	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+
+	// Target A = TOPMOST window at (300, 300, 400, 400)
+	targetA, _, _ := procCreateWindowExW.Call(
+		WS_EX_TOPMOST, uintptr(unsafe.Pointer(className)), 0, WS_POPUP|WS_VISIBLE,
+		300, 300, 400, 400, 0, 0, hInst, 0,
+	)
+	if targetA == 0 {
+		t.Skip("Could not create targetA window")
+	}
+	defer procDestroyWindow.Call(targetA)
+
+	// Target B = normal non-topmost window at (300, 300, 400, 400)
+	targetB, _, _ := procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(className)), 0, WS_POPUP,
+		300, 300, 400, 400, 0, 0, hInst, 0,
+	)
+	if targetB == 0 {
+		t.Skip("Could not create targetB window")
+	}
+	defer procDestroyWindow.Call(targetB)
+
+	procShowWindow.Call(targetB, 8) // SW_SHOWNA
+	time.Sleep(30 * time.Millisecond)
+
+	ctrl := NewVisualCursorController()
+	ctrl.ensureOverlay()
+	if ctrl.overlay == nil || ctrl.overlay.hwnd == 0 {
+		t.Skip("Overlay creation unavailable")
+	}
+
+	procGetWindowLongW := user32.NewProc("GetWindowLongW")
+
+	// 1. Target A = TOPMOST
+	ctrl.SetTargetHWND(targetA)
+	ctrl.MoveToAndWait(350, 350)
+	time.Sleep(30 * time.Millisecond)
+
+	exStyleA, _, _ := procGetWindowLongW.Call(ctrl.overlay.hwnd, ^uintptr(19)) // GWL_EXSTYLE = -20
+	if exStyleA&WS_EX_TOPMOST == 0 {
+		t.Fatalf("Overlay missing WS_EX_TOPMOST style when target A is topmost: exStyle = 0x%x", exStyleA)
+	}
+
+	// 2. Target B = normal non-topmost
+	ctrl.SetTargetHWND(targetB)
+	ctrl.MoveToAndWait(360, 360)
+	time.Sleep(30 * time.Millisecond)
+
+	exStyleB, _, _ := procGetWindowLongW.Call(ctrl.overlay.hwnd, ^uintptr(19)) // GWL_EXSTYLE = -20
+	if exStyleB&WS_EX_TOPMOST != 0 {
+		t.Fatalf("Overlay STILL HAS WS_EX_TOPMOST style after transitioning to normal target B: exStyle = 0x%x", exStyleB)
+	}
+
+	targetBRoot := platformGetRootWindow(targetB)
+	pB, _, _ := procGetWindow.Call(targetBRoot, GW_HWNDPREV)
+	if pB != ctrl.overlay.hwnd {
+		t.Fatalf("GetWindow(targetB, GW_HWNDPREV) = 0x%x, expected overlay 0x%x", pB, ctrl.overlay.hwnd)
 	}
 
 	ctrl.Reset()

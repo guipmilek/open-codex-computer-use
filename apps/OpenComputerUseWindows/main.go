@@ -169,10 +169,28 @@ func (limit textLimit) runtimeValue() any {
 }
 
 type psResponse struct {
-	OK       bool         `json:"ok"`
-	Text     string       `json:"text,omitempty"`
-	Error    string       `json:"error,omitempty"`
-	Snapshot *appSnapshot `json:"snapshot,omitempty"`
+	OK                        bool           `json:"ok"`
+	Text                      string         `json:"text,omitempty"`
+	Error                     string         `json:"error,omitempty"`
+	Snapshot                  *appSnapshot   `json:"snapshot,omitempty"`
+	EffectiveDpiContextIsPMv2 bool           `json:"effectiveDpiContextIsPMv2,omitempty"`
+	GetWindowRect             *rectJSON      `json:"getWindowRect,omitempty"`
+	UIABoundingRectangle      *uiaBoundsJSON `json:"uiaBoundingRectangle,omitempty"`
+	WindowBounds              *frame         `json:"windowBounds,omitempty"`
+}
+
+type rectJSON struct {
+	Left   int32 `json:"left"`
+	Top    int32 `json:"top"`
+	Right  int32 `json:"right"`
+	Bottom int32 `json:"bottom"`
+}
+
+type uiaBoundsJSON struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 type service struct {
