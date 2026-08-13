@@ -367,8 +367,9 @@ func (w *overlayWindow) updateFrame(screenX, screenY float64, renderState Visual
 }
 
 // setZOrder places the overlay immediately above targetHWND in Win32 Z-order.
-// If GetWindow(targetRoot, GW_HWNDPREV) == w.hwnd, the overlay is ALREADY immediately above targetRoot,
-// so setZOrder returns early without modifying Z-order.
+// It preserves the relative position when the overlay is already directly above the target
+// and in the same TOPMOST/non-TOPMOST band. If the target band changed, the overlay is
+// promoted/demoted first and then its relative order is recomputed.
 func (w *overlayWindow) setZOrder(targetHWND uintptr) {
 	w.postCmdSync(func() {
 		if targetHWND == 0 {
@@ -380,28 +381,37 @@ func (w *overlayWindow) setZOrder(targetHWND uintptr) {
 		}
 
 		targetRoot := platformGetRootWindow(targetHWND)
+		procGetWindowLongW := user32.NewProc("GetWindowLongW")
+		targetExStyle, _, _ := procGetWindowLongW.Call(targetRoot, ^uintptr(19)) // GWL_EXSTYLE = -20
+		overlayExStyle, _, _ := procGetWindowLongW.Call(w.hwnd, ^uintptr(19))    // GWL_EXSTYLE = -20
+		isTargetTopmost := targetExStyle&WS_EX_TOPMOST != 0
+		isOverlayTopmost := overlayExStyle&WS_EX_TOPMOST != 0
+
 		prev, _, _ := procGetWindow.Call(targetRoot, GW_HWNDPREV)
-		if prev == w.hwnd {
-			// Overlay is already directly above targetRoot!
-			// Preserve current Z-order and return without altering position.
+		if prev == w.hwnd && isOverlayTopmost == isTargetTopmost {
 			return
 		}
 
-		procGetWindowLongW := user32.NewProc("GetWindowLongW")
-		targetExStyle, _, _ := procGetWindowLongW.Call(targetRoot, ^uintptr(19)) // GWL_EXSTYLE = -20
-		isTargetTopmost := targetExStyle&WS_EX_TOPMOST != 0
+		if isTargetTopmost != isOverlayTopmost {
+			if isTargetTopmost {
+				procSetWindowPos.Call(w.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+			} else {
+				procSetWindowPos.Call(w.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+			}
+		}
+
+		// Recompute after a possible band transition. The previous neighbor may have
+		// changed, and using the stale value could make hWndInsertAfter point at self.
+		prev, _, _ = procGetWindow.Call(targetRoot, GW_HWNDPREV)
+		if prev == w.hwnd {
+			return
+		}
 
 		var hwndInsertAfter uintptr = HWND_TOP
 		if prev != 0 {
 			hwndInsertAfter = prev
 		} else if isTargetTopmost {
 			hwndInsertAfter = HWND_TOPMOST
-		}
-
-		if isTargetTopmost {
-			procSetWindowPos.Call(w.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
-		} else {
-			procSetWindowPos.Call(w.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
 		}
 
 		procSetWindowPos.Call(
