@@ -855,7 +855,7 @@ function Test-TextWindowHandleCandidate($process, $element) {
     if ($handle -eq [IntPtr]::Zero -or $handle -eq [IntPtr]$process.MainWindowHandle) {
         return $false
     }
-    $controlType = Get-ElementControlTypeName $element
+    $controlType = Get-ElementControlTypeName $element "ClassName"
     $className = Get-ElementString $element "ClassName"
     return (
         $controlType -like "*Edit*" -or
@@ -897,7 +897,6 @@ function Invoke-TypeText($process, [string]$text) {
     if ($targetHwnd -ne [IntPtr]::Zero -and (Send-TextToEditHandle $targetHwnd $text $element)) {
         return $true
     }
-
     if ($null -ne $element) {
         $valuePattern = Get-CurrentPatternOrNull $element ([Windows.Automation.ValuePattern]::Pattern)
         if ($null -ne $valuePattern -and -not $valuePattern.Current.IsReadOnly) {
@@ -1016,16 +1015,28 @@ try {
                 $eff = [OCUWin32]::GetThreadDpiAwarenessContext()
                 $isPMv2 = [OCUWin32]::AreDpiAwarenessContextsEqual($eff, $PMv2)
 
-                $rect = New-Object OCUWin32+RECT
-                $null = [OCUWin32]::GetWindowRect($hwnd, [ref]$rect)
+                $windowElement = Get-MainElement $process
+                $windowBounds = Get-WindowBounds $process $windowElement
+                if ($null -eq $windowBounds) {
+                    throw "dpi_diagnostics could not resolve positive window bounds"
+                }
 
-                $uiaBounds = if ($null -ne $windowElement) { $windowElement.Current.BoundingRectangle } else { $null }
+                $rect = New-Object OCUWin32+RECT
+                $gotWindowRect = [OCUWin32]::GetWindowRect($hwnd, [ref]$rect)
+                if (-not $gotWindowRect) {
+                    throw "dpi_diagnostics GetWindowRect failed"
+                }
+
+                $uiaBounds = $windowElement.Current.BoundingRectangle
+                if ($uiaBounds.IsEmpty -or $uiaBounds.Width -le 0 -or $uiaBounds.Height -le 0) {
+                    throw "dpi_diagnostics UIA BoundingRectangle is empty"
+                }
 
                 $response = [pscustomobject]@{
                     ok = $true
                     effectiveDpiContextIsPMv2 = $isPMv2
                     getWindowRect = [pscustomobject]@{ left = $rect.Left; top = $rect.Top; right = $rect.Right; bottom = $rect.Bottom }
-                    uiaBoundingRectangle = if ($null -ne $uiaBounds) { [pscustomobject]@{ x = $uiaBounds.X; y = $uiaBounds.Y; width = $uiaBounds.Width; height = $uiaBounds.Height } } else { $null }
+                    uiaBoundingRectangle = [pscustomobject]@{ x = $uiaBounds.X; y = $uiaBounds.Y; width = $uiaBounds.Width; height = $uiaBounds.Height }
                     windowBounds = $windowBounds
                 }
                 $response | ConvertTo-Json -Depth 8 | Write-Output
